@@ -511,7 +511,24 @@ export function TvlOverviewChart() {
           {/* Bento main – chart, wrapped in NoisyCard for the frontend-v3
               "soft bento" treatment (noise texture, inner shadow, hover
               radial gradient). */}
-          <Box flex={1} minH={{ base: '320px', md: '420px' }} minW={0} position="relative">
+          <Box
+            // Two-axis problem:
+            //  - ECharts asks `height: 100%`, so the parent must have an
+            //    explicit `h` (not just `minH`) — without it the canvas
+            //    resolves to 0 and the chart collapses to ~content height
+            //    (the original 372px symptom).
+            //  - Below `lg` the Stack is column-direction. `flex: 1` then
+            //    sets `flex-basis: 0` on the main axis (height), which
+            //    overrides our `h` and re-collapses the chart. So `flex` is
+            //    disabled in column mode; we only enable it at `lg+` where
+            //    the Stack is row and `flex: 1` correctly fills the
+            //    remaining horizontal space.
+            flex={{ base: 'none', lg: 1 }}
+            h={{ base: '360px', lg: '420px' }}
+            minW={0}
+            position="relative"
+            w="full"
+          >
             <NoisyCard
               cardProps={{ height: 'full', overflow: 'hidden' }}
               contentProps={{ display: 'flex', flexDirection: 'column', height: 'full', p: 'sm' }}
