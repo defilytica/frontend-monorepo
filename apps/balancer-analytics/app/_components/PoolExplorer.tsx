@@ -68,10 +68,13 @@ const num = (n: number) =>
 
 const pct = (n: number, digits = 2) => `${(n * 100).toFixed(digits)}%`
 
+// Route into the analytics pool-detail page (`/pool/[chain]/[id]`). We use
+// `p.id` (api-v3's canonical id) rather than `p.address` so V2 pools — whose
+// id is a 66-char `address + type + nonce` — work in one shot. V3 pools have
+// `id === address` so either form would suffice for them.
 function getPoolHref(p: EnrichedPool): string {
   const slug = chainToSlugMap[p.chain] ?? 'ethereum'
-  const variant = p.protocolVersion === 3 ? 'v3' : 'v2'
-  return `https://balancer.fi/pools/${slug}/${variant}/${p.id}`
+  return `/pool/${slug}/${p.id}`
 }
 
 function buildCsv(rows: EnrichedPool[]): string {
@@ -463,7 +466,7 @@ function TableRow({ pool, index }: { pool: EnrichedPool; index: number }) {
       transition="background 0.15s"
       w="full"
     >
-      <Link href={getPoolHref(pool)} prefetch={false} role="group" target="_blank">
+      <Link href={getPoolHref(pool)} prefetch={false} role="group">
         <Grid
           alignItems="center"
           gap={{ base: 'sm', lg: 'ms' }}
