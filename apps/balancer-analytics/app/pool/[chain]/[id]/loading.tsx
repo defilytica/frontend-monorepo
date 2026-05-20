@@ -26,7 +26,8 @@ export default function Loading(): React.JSX.Element {
           <Spinner color="font.linkHover" size="xl" thickness="3px" />
           <Text fontWeight="medium">Indexing pool parameter changes</Text>
           <Text fontSize="sm" maxW="380px" textAlign="center" variant="secondary">
-            First visit scans up to 90 days of on-chain events. Subsequent loads are near-instant.
+            Scanning on-chain parameter events (90 days by default, full pool history when
+            requested). Subsequent loads are near-instant.
           </Text>
         </VStack>
       </Box>

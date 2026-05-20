@@ -60,11 +60,13 @@ const CATEGORY_LABELS: Record<EventCategory, string> = {
   other: 'Other',
 }
 
-// Responsive grid columns mirror the PoolExplorer pattern: same column
-// template for header and body, with `minmax(0, 1fr)` on the Args column so
-// it absorbs leftover horizontal space gracefully.
+// Responsive grid columns mirror the PoolExplorer pattern: same template
+// for header and body, with `minmax(0, 1fr)` on Args so it absorbs
+// leftover horizontal space gracefully. On `base` we collapse to a single
+// stacked column (see `EventRow` below) so narrow viewports don't need
+// horizontal scroll just to read one event.
 const GRID_COLS = {
-  base: '160px 220px minmax(0, 1fr) 130px',
+  base: '1fr',
   md: '180px 240px minmax(0, 1fr) 140px',
 }
 
@@ -77,14 +79,21 @@ function ArgList({ args }: { args: Record<string, string | number | boolean> }):
       </Text>
     )
   }
+  // Horizontal key/value on `md+`, stacked on `base` so long values
+  // (timestamps, formatted percentages) can't overflow a narrow viewport.
   return (
     <Box>
       {entries.map(([k, v]) => (
-        <Flex align="baseline" gap="sm" key={k}>
-          <Text color="font.secondary" fontSize="2xs" minW="80px">
+        <Flex
+          align={{ base: 'flex-start', md: 'baseline' }}
+          direction={{ base: 'column', md: 'row' }}
+          gap={{ base: '2xs', md: 'sm' }}
+          key={k}
+        >
+          <Text color="font.secondary" fontSize="2xs" minW={{ base: 0, md: '80px' }}>
             {k}
           </Text>
-          <Text fontFamily="mono" fontSize="xs">
+          <Text fontFamily="mono" fontSize="xs" wordBreak="break-word">
             {formatEventArgValue(k, v)}
           </Text>
         </Flex>
@@ -94,12 +103,15 @@ function ArgList({ args }: { args: Record<string, string | number | boolean> }):
 }
 
 function EventHeader(): React.JSX.Element {
+  // Hidden on `base` — stacked rows carry their own inline labels so a
+  // sticky column header would just steal vertical space on phones.
   return (
     <Grid
       alignItems="center"
       borderBottom="1px solid"
       borderColor="border.base"
-      gap={{ base: 'sm', md: 'ms' }}
+      display={{ base: 'none', md: 'grid' }}
+      gap="ms"
       gridTemplateColumns={GRID_COLS}
       px={{ base: 'md', md: 'lg' }}
       py="sm"
@@ -126,6 +138,23 @@ function EventHeader(): React.JSX.Element {
         </Text>
       </GridItem>
     </Grid>
+  )
+}
+
+/** Inline label shown above each field on `base` viewports only. Hidden on
+ *  `md+` where the sticky column header carries the labels instead. */
+function MobileLabel({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return (
+    <Text
+      color="font.secondary"
+      display={{ base: 'block', md: 'none' }}
+      fontSize="2xs"
+      fontWeight="bold"
+      mb="2xs"
+      textTransform="uppercase"
+    >
+      {children}
+    </Text>
   )
 }
 
@@ -156,9 +185,11 @@ function EventRow({
         w="full"
       >
         <GridItem>
+          <MobileLabel>When</MobileLabel>
           <Text fontSize="xs">{dateFmt.format(new Date(event.blockTimestamp * 1000))}</Text>
         </GridItem>
         <GridItem minW={0}>
+          <MobileLabel>Event</MobileLabel>
           <HStack mb="2xs" spacing="xs">
             <Box bg={style.color} borderRadius="full" flexShrink={0} h="8px" w="8px" />
             <Text fontSize="xs" fontWeight="500">
@@ -170,9 +201,15 @@ function EventRow({
           </Text>
         </GridItem>
         <GridItem minW={0}>
+          <MobileLabel>Arguments</MobileLabel>
           <ArgList args={event.args} />
         </GridItem>
-        <GridItem fontFamily="mono" fontSize="xs" justifySelf="end">
+        <GridItem
+          fontFamily="mono"
+          fontSize="xs"
+          justifySelf={{ base: 'start', md: 'end' }}
+        >
+          <MobileLabel>Tx</MobileLabel>
           {explorerBase ? (
             <Link href={`${explorerBase}${event.txHash}`} rel="noreferrer" target="_blank">
               {shortHash(event.txHash)}
@@ -291,13 +328,8 @@ export function PoolEventLog({
           </HStack>
         )}
 
-        <Card
-          overflowX={{ base: 'auto', lg: 'hidden' }}
-          overflowY="hidden"
-          p={0}
-          variant="subSection"
-        >
-          <Box minW={{ base: '720px', lg: 'auto' }} w="full">
+        <Card overflow="hidden" p={0} variant="subSection">
+          <Box w="full">
             <PaginatedTable<PoolParamEvent>
               getRowId={ev => `${ev.txHash}-${ev.logIndex}`}
               items={pageItems}

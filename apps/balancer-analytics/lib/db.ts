@@ -144,6 +144,12 @@ export async function ensureSchema(): Promise<void> {
       PRIMARY KEY (chain, pool_address)
     )
   `
+  // `deep_synced` records that a one-time full-history scan (from the
+  // pool's deployment block, not the 90-day cap) has completed for this
+  // pool. Once true, a `?fullHistory` visit is served from the DB on the
+  // normal warm path instead of re-walking the whole chain every time.
+  // Idempotent ALTER so existing deploys migrate in place.
+  await sql`ALTER TABLE pool_sync_state ADD COLUMN IF NOT EXISTS deep_synced BOOLEAN NOT NULL DEFAULT false`
 }
 
 // ── pool_param_events helpers ──────────────────────────────────────────────
@@ -192,6 +198,26 @@ export async function getPoolParamEvents(
   }))
 }
 
+/**
+ * Cheap existence check for a pool's persisted timeline. Used by the sync
+ * to detect the "poisoned watermark" state — a `pool_sync_state` row whose
+ * `last_block` advanced past real events while zero rows were ever captured
+ * (e.g. a sync that ran before a pool type's Filter B was wired). Such a
+ * pool can never self-heal on the warm `watermark + 1` path, so the sync
+ * falls back to a cold-range rescan when this returns 0.
+ */
+export async function countPoolParamEvents(
+  chain: string,
+  poolAddress: string
+): Promise<number> {
+  const rows = await sql`
+    SELECT count(*)::int AS n
+    FROM pool_param_events
+    WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+  `
+  return Number((rows as Record<string, unknown>[])[0]?.n ?? 0)
+}
+
 export async function insertPoolParamEvents(
   rows: readonly PoolParamEventRow[]
 ): Promise<void> {
@@ -230,6 +256,9 @@ export type PoolSyncState = {
   poolAddress: string
   lastBlock: number
   lastSyncedAt: Date
+  /** A full-history scan (from the deployment block) has completed for this
+   *  pool. `?fullHistory` then serves from the DB instead of re-scanning. */
+  deepSynced: boolean
 }
 
 export async function getPoolSyncState(
@@ -237,7 +266,7 @@ export async function getPoolSyncState(
   poolAddress: string
 ): Promise<PoolSyncState | null> {
   const rows = await sql`
-    SELECT chain, pool_address, last_block, last_synced_at
+    SELECT chain, pool_address, last_block, last_synced_at, deep_synced
     FROM pool_sync_state
     WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
     LIMIT 1
@@ -249,19 +278,28 @@ export async function getPoolSyncState(
     poolAddress: r.pool_address as string,
     lastBlock: Number(r.last_block),
     lastSyncedAt: new Date(r.last_synced_at as string),
+    deepSynced: r.deep_synced === true,
   }
 }
 
+/**
+ * Upsert the per-pool watermark. `markDeepSynced` is monotonic — passing
+ * `true` latches `deep_synced` on (a completed full-history scan), passing
+ * `false` (the default, for normal tail-syncs) preserves whatever it was.
+ * It never flips back to false.
+ */
 export async function upsertPoolSyncState(
   chain: string,
   poolAddress: string,
-  lastBlock: number
+  lastBlock: number,
+  markDeepSynced = false
 ): Promise<void> {
   await sql`
-    INSERT INTO pool_sync_state (chain, pool_address, last_block, last_synced_at)
-    VALUES (${chain}, ${poolAddress.toLowerCase()}, ${lastBlock}, now())
+    INSERT INTO pool_sync_state (chain, pool_address, last_block, last_synced_at, deep_synced)
+    VALUES (${chain}, ${poolAddress.toLowerCase()}, ${lastBlock}, now(), ${markDeepSynced})
     ON CONFLICT (chain, pool_address) DO UPDATE
       SET last_block = EXCLUDED.last_block,
-          last_synced_at = now()
+          last_synced_at = now(),
+          deep_synced = pool_sync_state.deep_synced OR EXCLUDED.deep_synced
   `
 }

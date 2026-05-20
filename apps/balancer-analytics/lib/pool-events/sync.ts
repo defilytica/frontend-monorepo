@@ -26,6 +26,7 @@ import type { Address } from 'viem'
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import {
   ensureSchema,
+  countPoolParamEvents,
   getPoolParamEvents,
   getPoolSyncState,
   insertPoolParamEvents,
@@ -87,6 +88,11 @@ const metadataCache = new Map<string, { value: PoolMetadata; expiresAt: number }
 export type SyncOptions = {
   ttlSeconds?: number
   force?: boolean
+  /** Scan from the pool's (approx) deployment block instead of the 90-day
+   *  cap. Implies a cold rescan (the warm watermark sits past the 90-day
+   *  floor, so a tail-sync can never reach older history). ~150 RPC
+   *  requests for a multi-year mainnet pool — negligible per §7. */
+  fullHistory?: boolean
 }
 
 export type SyncResult = {
@@ -130,8 +136,18 @@ async function runSync(
   const pool = poolAddress.toLowerCase()
   const state = await getPoolSyncState(chain, pool)
 
+  // A `?fullHistory` request only needs the expensive deployment-block scan
+  // the *first* time. Once `deep_synced` is latched, the DB already holds
+  // the full timeline and every later full-history visit is served on the
+  // normal warm path (fast). `force` still re-deep-scans on demand.
+  const needDeepScan = options.fullHistory === true && state?.deepSynced !== true
+
   // ── TTL fast path ──
-  if (!options.force && state) {
+  // `force` and a *first* full-history request bypass the TTL. A
+  // full-history request on an already-deep-synced pool does NOT — it falls
+  // through to the cached/warm path so we don't re-walk the chain every
+  // time someone opens a `?fullHistory` URL.
+  if (!options.force && !needDeepScan && state) {
     const ageSeconds = (Date.now() - state.lastSyncedAt.getTime()) / 1000
     if (ageSeconds < ttl) {
       const rows = await getPoolParamEvents(chain, pool)
@@ -161,25 +177,66 @@ async function runSync(
   const head = await client.getBlockNumber()
   const safeHead = head > REORG_CONFIRMATIONS ? head - REORG_CONFIRMATIONS : 0n
 
+  // ── Decide whether to honor the watermark or rescan from the cold floor ──
+  // The warm path (`fromBlock = watermark + 1`) is correct only if the
+  // watermark is trustworthy. Two cases where it isn't:
+  //
+  //   1. `force` — POST /events or `?refresh`. The documented recovery path
+  //      (handoff §8 triage) assumed this re-scans; it must, otherwise
+  //      `?refresh` only bypasses the 30s TTL and re-serves the same stale
+  //      rows. Force now means "full re-scan", not "skip the cache".
+  //
+  //   2. Poisoned watermark — a `pool_sync_state` row exists and has
+  //      advanced, but zero events were ever persisted for the pool. This
+  //      is the exact signature of a sync that ran before this pool type's
+  //      Filter B was wired (or a filter that succeeded-but-empty): the
+  //      watermark skipped real events and the warm path can never look
+  //      back. Treat it as cold so the next post-TTL visit self-heals. The
+  //      30s TTL fast-path above still throttles a legitimately-empty pool
+  //      to at most one cold scan per TTL window (~$0.0004/scan on mainnet
+  //      — negligible per the §7 cost model).
+  //
+  // Cold re-scans are safe and cheap: `insertPoolParamEvents` is idempotent
+  // on the UNIQUE constraint, so re-scanning a range we already have just
+  // costs RPC budget, never duplicate rows.
+  const persistedCount = state ? await countPoolParamEvents(chain, pool) : 0
+  const poisonedWatermark = state !== null && persistedCount === 0
+  const rescanFromCold = options.force || poisonedWatermark || needDeepScan
+
   // ── Scan range ──
   let fromBlock: bigint
-  if (state) {
+  // True only when this run actually walked from the deployment block — the
+  // signal that latches `deep_synced`. A full-history request that fell back
+  // to the 90-day cap (unknown createTime) must NOT latch it.
+  let scannedFullHistory = false
+  if (state && !rescanFromCold) {
     // Warm — pick up where we left off.
     fromBlock = BigInt(state.lastBlock) + 1n
   } else {
-    // Cold — 90-day cap, clamped to pool creation if known.
-    const cap = ninetyDayFromBlock(chain, safeHead)
-    fromBlock = cap
+    // Approximate the pool's deployment block from api-v3 `createTime`:
+    // head − ((now − createTime) / blockTime). We don't have an exact
+    // creation block from api-v3, but the approximation is sufficient —
+    // the chunked log walker tolerates empty ranges cheaply.
+    let createBlock: bigint | null = null
     if (metadata.createTime) {
-      // Approximate the creation block: head − ((now − createTime) / blockTime).
-      // We don't have an exact creation block from api-v3, but the
-      // approximation is sufficient because (a) the chunked log walker
-      // tolerates empty ranges cheaply and (b) the cap is conservative.
       const now = Math.floor(Date.now() / 1000)
       const ageSec = Math.max(0, now - metadata.createTime)
       const ageBlocks = BigInt(Math.ceil(ageSec * estimateBlocksPerSecond(chain)))
-      const createBlock = safeHead > ageBlocks ? safeHead - ageBlocks : 0n
-      if (createBlock > fromBlock) fromBlock = createBlock
+      createBlock = safeHead > ageBlocks ? safeHead - ageBlocks : 0n
+    }
+    const cap = ninetyDayFromBlock(chain, safeHead)
+    if (options.fullHistory && createBlock !== null) {
+      // Full history — scan from the (approx) deployment block, no 90-day
+      // floor. Requires a known `createTime`; without it we'd be scanning
+      // from genesis (500+ chunks on a mature mainnet), so we fall back to
+      // the 90-day cap below rather than burn that range blind.
+      fromBlock = createBlock
+      scannedFullHistory = true
+    } else {
+      // Cold (or full-history with unknown createTime) — 90-day cap, raised
+      // to the deployment block when the pool is younger than the cap (no
+      // point scanning before it existed).
+      fromBlock = createBlock !== null && createBlock > cap ? createBlock : cap
     }
   }
 
@@ -264,6 +321,13 @@ async function runSync(
     poolType: metadata.type,
     fromBlock: Number(fromBlock),
     toBlock: Number(safeHead),
+    rescanFromCold,
+    poisonedWatermark,
+    persistedCount,
+    forced: options.force === true,
+    fullHistory: options.fullHistory === true,
+    needDeepScan,
+    scannedFullHistory,
     filterALogs: filterAResult.logs.length,
     filterBLogs: filterBResult.logs.length,
     filterBEventCount: filterBEvents.length,
@@ -299,8 +363,14 @@ async function runSync(
   // the next visit will retry the failed filter from the same fromBlock.
   // (Re-inserts are idempotent via the UNIQUE constraint, so the cost of
   // a successful filter being re-scanned is just RPC budget.)
+  //
+  // Latch `deep_synced` when this run was a full-history scan that
+  // succeeded on both filters: `fromBlock` reached the deployment block, so
+  // the DB now holds the complete timeline and future `?fullHistory` visits
+  // can serve from it without re-walking the chain. `force` alone does not
+  // latch it (a forced 90-day rescan hasn't covered the deep range).
   if (!filterAResult.err && !filterBResult.err) {
-    await upsertPoolSyncState(chain, pool, Number(safeHead))
+    await upsertPoolSyncState(chain, pool, Number(safeHead), scannedFullHistory)
   }
 
   const allRows = await getPoolParamEvents(chain, pool)
@@ -376,10 +446,29 @@ async function fetchPoolMetadata(
     body: JSON.stringify({ query, variables: { id: poolAddress.toLowerCase(), chain } }),
     cache: 'no-store',
   })
-  if (!res.ok) return null
+  // Mirror the page-side `gqlFetch` logging — silent `null` here would
+  // hide a Cloudflare rate-limit (429) or a future api-v3 schema break
+  // behind a generic "pool not found" path, which is what bit us earlier.
+  if (!res.ok) {
+    console.warn('[sync] api-v3 fetchPoolMetadata HTTP failure', {
+      chain,
+      pool: poolAddress,
+      status: res.status,
+      retryAfter: res.headers.get('retry-after'),
+    })
+    return null
+  }
   const json = (await res.json()) as {
     data?: { poolGetPool?: { type: string; protocolVersion: number; createTime: number } }
     errors?: unknown
+  }
+  if (json.errors) {
+    console.warn('[sync] api-v3 fetchPoolMetadata GraphQL errors', {
+      chain,
+      pool: poolAddress,
+      errors: json.errors,
+    })
+    return null
   }
   const pool = json.data?.poolGetPool
   if (!pool) return null

@@ -61,6 +61,48 @@ const V2_STABLE_POOL_ABI = parseAbi([
   'function getAmplificationParameter() view returns (uint256 value, bool isUpdating, uint256 precision)',
 ]) satisfies Abi
 
+// ── V3 type-specific ABIs (every signature verified on a live pool, see
+//    POOL_EXPLORER_DESIGN.md §5: hand-curated, on-chain-verified) ──
+
+const V3_WEIGHTED_ABI = parseAbi([
+  'function getNormalizedWeights() view returns (uint256[])',
+]) satisfies Abi
+
+// GyroECLP. `getECLPParams` returns the 5 human-meaningful ECLP params plus
+// a derived-params struct of math internals (tau vectors etc.) we don't
+// surface — decoded only so viem can walk past it.
+const V3_GYRO_ECLP_ABI = parseAbi([
+  'function getECLPParams() view returns ((int256 alpha, int256 beta, int256 c, int256 s, int256 lambda) params, ((int256 x, int256 y) tauAlpha, (int256 x, int256 y) tauBeta, int256 u, int256 v, int256 w, int256 z, int256 dSq) derived)',
+]) satisfies Abi
+
+const V3_RECLAMM_ABI = parseAbi([
+  'function computeCurrentPriceRatio() view returns (uint256)',
+  'function getCenterednessMargin() view returns (uint256)',
+  'function getDailyPriceShiftExponent() view returns (uint256)',
+  'function isPoolWithinTargetRange() view returns (bool)',
+  'function getLastTimestamp() view returns (uint256)',
+  'function getPriceRatioState() view returns ((uint96 startFourthRootPriceRatio, uint96 endFourthRootPriceRatio, uint32 priceRatioUpdateStartTime, uint32 priceRatioUpdateEndTime))',
+]) satisfies Abi
+
+const V3_LBP_ABI = parseAbi([
+  'function isSwapEnabled() view returns (bool)',
+  'function getNormalizedWeights() view returns (uint256[])',
+  'function getGradualWeightUpdateParams() view returns (uint256 startTime, uint256 endTime, uint256[] startWeights, uint256[] endWeights)',
+]) satisfies Abi
+
+const V3_QUANT_AMM_ABI = parseAbi([
+  'function getNormalizedWeights() view returns (uint256[])',
+  'function getWithinFixWindow() view returns (bool)',
+  'function getOracleStalenessThreshold() view returns (uint256)',
+]) satisfies Abi
+
+// StableSurge hook is a separate contract, keyed by pool. Addresses come
+// from v3-addresses.ts (active + legacy). Both getters take the pool.
+const V3_STABLE_SURGE_HOOK_ABI = parseAbi([
+  'function getSurgeThresholdPercentage(address pool) view returns (uint256)',
+  'function getMaxSurgeFeePercentage(address pool) view returns (uint256)',
+]) satisfies Abi
+
 // V2 protocol-fee types (from balancer-v2-monorepo IProtocolFeePercentagesProvider).
 // Used to query the per-pool fee cache. We don't expose the AUM type
 // because no current pool surfaces it in analytics; add later if needed.
@@ -107,6 +149,54 @@ export type StableTypeState = {
     endTime: number
     precision: string
   }
+}
+
+/** All weight/percentage values are 1e18-scaled decimal strings; the
+ *  inspector divides as needed. Time fields are unix seconds. */
+export type WeightedTypeState = { normalizedWeights: string[] }
+
+export type GyroEclpTypeState = {
+  alpha: string
+  beta: string
+  c: string
+  s: string
+  lambda: string
+}
+
+export type ReclammTypeState = {
+  currentPriceRatio: string
+  centerednessMargin: string
+  dailyPriceShiftExponent: string
+  lastTimestamp: number
+  isWithinTargetRange: boolean
+  priceRatio: {
+    start: string
+    end: string
+    startTime: number
+    endTime: number
+  }
+}
+
+export type LbpTypeState = {
+  swapEnabled: boolean
+  normalizedWeights: string[]
+  update: {
+    startTime: number
+    endTime: number
+    startWeights: string[]
+    endWeights: string[]
+  }
+}
+
+export type QuantAmmTypeState = {
+  normalizedWeights: string[]
+  withinFixWindow: boolean
+  oracleStalenessThreshold: number
+}
+
+export type StableSurgeState = {
+  surgeThresholdPercentage: string
+  maxSurgeFeePercentage: string
 }
 
 export async function readUniversalV3State(
@@ -372,4 +462,205 @@ export async function readV2StableTypeState(
       precision: param[2].toString(),
     },
   }
+}
+
+// ── V3 type-specific readers ───────────────────────────────────────────────
+// Each is a single `eth_call` (or one small multicall) against the pool
+// contract. They return `null` on failure so the page degrades to the
+// universal panel rather than erroring (DESIGN §10.5).
+
+const toStrs = (xs: readonly bigint[]): string[] => xs.map(x => x.toString())
+
+/** V3 Weighted (and any pool exposing `getNormalizedWeights`). */
+export async function readWeightedTypeState(
+  chain: GqlChain,
+  poolAddress: Address
+): Promise<WeightedTypeState | null> {
+  const client = getPublicClient(chain)
+  try {
+    const w = (await client.readContract({
+      address: poolAddress,
+      abi: V3_WEIGHTED_ABI,
+      functionName: 'getNormalizedWeights',
+    })) as readonly bigint[]
+    return { normalizedWeights: toStrs(w) }
+  } catch {
+    return null
+  }
+}
+
+/** GyroECLP — the 5 human-meaningful params (alpha/beta/c/s/lambda). */
+export async function readGyroEclpTypeState(
+  chain: GqlChain,
+  poolAddress: Address
+): Promise<GyroEclpTypeState | null> {
+  const client = getPublicClient(chain)
+  try {
+    const res = (await client.readContract({
+      address: poolAddress,
+      abi: V3_GYRO_ECLP_ABI,
+      functionName: 'getECLPParams',
+    })) as readonly [
+      { alpha: bigint; beta: bigint; c: bigint; s: bigint; lambda: bigint },
+      unknown,
+    ]
+    const p = res[0]
+    return {
+      alpha: p.alpha.toString(),
+      beta: p.beta.toString(),
+      c: p.c.toString(),
+      s: p.s.toString(),
+      lambda: p.lambda.toString(),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** reCLAMM — current price ratio, centeredness, shift exponent, range
+ *  status, and the price-ratio update schedule. */
+export async function readReclammTypeState(
+  chain: GqlChain,
+  poolAddress: Address
+): Promise<ReclammTypeState | null> {
+  const client = getPublicClient(chain)
+  const results = await client.multicall({
+    contracts: [
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentPriceRatio' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getCenterednessMargin' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getDailyPriceShiftExponent' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'isPoolWithinTargetRange' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getLastTimestamp' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getPriceRatioState' },
+    ],
+    allowFailure: true,
+  })
+  if (results[0].status !== 'success') return null
+  const prs = results[5].status === 'success'
+    ? (results[5].result as {
+        startFourthRootPriceRatio: bigint
+        endFourthRootPriceRatio: bigint
+        priceRatioUpdateStartTime: number
+        priceRatioUpdateEndTime: number
+      })
+    : null
+  return {
+    currentPriceRatio: (results[0].result as bigint).toString(),
+    centerednessMargin:
+      results[1].status === 'success' ? (results[1].result as bigint).toString() : '0',
+    dailyPriceShiftExponent:
+      results[2].status === 'success' ? (results[2].result as bigint).toString() : '0',
+    isWithinTargetRange:
+      results[3].status === 'success' ? (results[3].result as boolean) : false,
+    lastTimestamp:
+      results[4].status === 'success' ? Number(results[4].result as bigint) : 0,
+    priceRatio: prs
+      ? {
+          start: prs.startFourthRootPriceRatio.toString(),
+          end: prs.endFourthRootPriceRatio.toString(),
+          startTime: Number(prs.priceRatioUpdateStartTime),
+          endTime: Number(prs.priceRatioUpdateEndTime),
+        }
+      : { start: '0', end: '0', startTime: 0, endTime: 0 },
+  }
+}
+
+/** V3 LBP — current weights, swap-enabled flag, gradual-weight schedule. */
+export async function readLbpTypeState(
+  chain: GqlChain,
+  poolAddress: Address
+): Promise<LbpTypeState | null> {
+  const client = getPublicClient(chain)
+  const results = await client.multicall({
+    contracts: [
+      { address: poolAddress, abi: V3_LBP_ABI, functionName: 'getNormalizedWeights' },
+      { address: poolAddress, abi: V3_LBP_ABI, functionName: 'isSwapEnabled' },
+      { address: poolAddress, abi: V3_LBP_ABI, functionName: 'getGradualWeightUpdateParams' },
+    ],
+    allowFailure: true,
+  })
+  if (results[0].status !== 'success') return null
+  const upd = results[2].status === 'success'
+    ? (results[2].result as readonly [bigint, bigint, readonly bigint[], readonly bigint[]])
+    : null
+  return {
+    normalizedWeights: toStrs(results[0].result as readonly bigint[]),
+    swapEnabled: results[1].status === 'success' ? (results[1].result as boolean) : false,
+    update: upd
+      ? {
+          startTime: Number(upd[0]),
+          endTime: Number(upd[1]),
+          startWeights: toStrs(upd[2]),
+          endWeights: toStrs(upd[3]),
+        }
+      : { startTime: 0, endTime: 0, startWeights: [], endWeights: [] },
+  }
+}
+
+/** QuantAMM — current dynamic weights + oracle window params. */
+export async function readQuantAmmTypeState(
+  chain: GqlChain,
+  poolAddress: Address
+): Promise<QuantAmmTypeState | null> {
+  const client = getPublicClient(chain)
+  const results = await client.multicall({
+    contracts: [
+      { address: poolAddress, abi: V3_QUANT_AMM_ABI, functionName: 'getNormalizedWeights' },
+      { address: poolAddress, abi: V3_QUANT_AMM_ABI, functionName: 'getWithinFixWindow' },
+      { address: poolAddress, abi: V3_QUANT_AMM_ABI, functionName: 'getOracleStalenessThreshold' },
+    ],
+    allowFailure: true,
+  })
+  if (results[0].status !== 'success') return null
+  return {
+    normalizedWeights: toStrs(results[0].result as readonly bigint[]),
+    withinFixWindow: results[1].status === 'success' ? (results[1].result as boolean) : false,
+    oracleStalenessThreshold:
+      results[2].status === 'success' ? Number(results[2].result as bigint) : 0,
+  }
+}
+
+/**
+ * StableSurge hook params for a pool. The hook is a separate contract; a
+ * pool may be registered against the active or a legacy deployment, so we
+ * probe every configured hook and take the first that answers. Returns
+ * `null` when the pool has no surge hook (every probe reverts) or the chain
+ * has no configured hooks.
+ */
+export async function readStableSurgeState(
+  chain: GqlChain,
+  poolAddress: Address
+): Promise<StableSurgeState | null> {
+  const helpers = getV3HelperAddresses(chain)
+  if (!helpers?.stableSurgeHooks?.length) return null
+  const client = getPublicClient(chain)
+  const results = await client.multicall({
+    contracts: helpers.stableSurgeHooks.flatMap(hook => [
+      {
+        address: hook,
+        abi: V3_STABLE_SURGE_HOOK_ABI,
+        functionName: 'getSurgeThresholdPercentage',
+        args: [poolAddress],
+      },
+      {
+        address: hook,
+        abi: V3_STABLE_SURGE_HOOK_ABI,
+        functionName: 'getMaxSurgeFeePercentage',
+        args: [poolAddress],
+      },
+    ]),
+    allowFailure: true,
+  })
+  for (let i = 0; i < results.length; i += 2) {
+    const threshold = results[i]
+    const maxFee = results[i + 1]
+    if (threshold.status === 'success') {
+      return {
+        surgeThresholdPercentage: (threshold.result as bigint).toString(),
+        maxSurgeFeePercentage:
+          maxFee.status === 'success' ? (maxFee.result as bigint).toString() : '0',
+      }
+    }
+  }
+  return null
 }

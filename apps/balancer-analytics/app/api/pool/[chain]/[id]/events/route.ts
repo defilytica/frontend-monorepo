@@ -79,10 +79,16 @@ async function handle(
   // On-chain calls always use the 20-byte contract address. For V2 poolIds
   // (66 chars) we strip the trailing type+nonce bytes.
   const contractAddress = rawId.length === 66 ? rawId.slice(0, 42) : rawId
+  // `?fullHistory` mirrors the page: scan from the deployment block instead
+  // of the 90-day cap. Implies a cold rescan inside `syncPoolEvents`.
+  const fullHistory = new URL(request.url).searchParams.has('fullHistory')
 
   try {
     await ensureSchema()
-    const result = await syncPoolEvents(chain, contractAddress, { force: options.force })
+    const result = await syncPoolEvents(chain, contractAddress, {
+      force: options.force,
+      fullHistory,
+    })
     const payload: PoolEventsResponse = {
       pool: contractAddress,
       chain,

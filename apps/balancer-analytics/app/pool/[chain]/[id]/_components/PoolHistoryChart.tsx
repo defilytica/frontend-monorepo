@@ -1,8 +1,9 @@
 'use client'
 
 import { Box, Flex, HStack, Text } from '@chakra-ui/react'
+import type { ECharts } from 'echarts/core'
 import ReactECharts from 'echarts-for-react'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import type { PoolPageData } from '../page'
 import { CATEGORY_ORDER, EVENT_STYLES, getEventStyle, type EventCategory } from './eventStyles'
 import { formatEventArgValue } from './formatEventArgs'
@@ -69,9 +70,17 @@ type MarkPoint = {
 export function PoolHistoryChart({
   snapshots,
   events,
+  cursors,
+  onCursorClick,
 }: {
   snapshots: PoolPageData['snapshots']
   events: PoolPageData['events']
+  /** Two-cursor compare-mode positions, unix-seconds. `null` slots mean
+   *  "no cursor set yet" — visible markers only render for set slots. */
+  cursors?: { a: number | null; b: number | null }
+  /** Called with a clicked-grid x-axis timestamp (unix seconds). Receives
+   *  clicks anywhere inside the plot area, not just on series points. */
+  onCursorClick?: (timestamp: number) => void
 }): React.JSX.Element {
   // Per-event-name counts for the legend chip strip. Ordered later by
   // category to match the chart's color story.
@@ -131,7 +140,21 @@ export function PoolHistoryChart({
 
     // Vertical dashed lines at every in-range event — visible regardless of
     // y-axis value, drawn under the pins (`z: 1`).
-    const markLines = inRangeEvents.map(e => {
+    const markLines: Array<{
+      xAxis: number
+      lineStyle: { color: string; type: 'dashed' | 'solid'; width: number; opacity: number }
+      label: {
+        show: boolean
+        formatter?: string
+        position?: string
+        color?: string
+        fontWeight?: number
+        fontSize?: number
+        backgroundColor?: string
+        padding?: number[]
+        borderRadius?: number
+      }
+    }> = inRangeEvents.map(e => {
       const style = getEventStyle(e.eventName)
       return {
         xAxis: e.blockTimestamp * 1000,
@@ -144,6 +167,45 @@ export function PoolHistoryChart({
         label: { show: false },
       }
     })
+
+    // Compare-mode cursors — solid, opaque, labelled. Drawn over the
+    // dashed event lines so they're always identifiable, even when an
+    // event happens at the exact cursor instant.
+    const cursorColor = '#E6C6A0'
+    if (cursors?.a != null) {
+      markLines.push({
+        xAxis: cursors.a * 1000,
+        lineStyle: { color: cursorColor, type: 'solid', width: 2, opacity: 0.9 },
+        label: {
+          show: true,
+          formatter: 'A',
+          position: 'insideEndTop',
+          color: '#1a1a22',
+          fontWeight: 700,
+          fontSize: 11,
+          backgroundColor: cursorColor,
+          padding: [2, 6, 2, 6],
+          borderRadius: 4,
+        },
+      })
+    }
+    if (cursors?.b != null) {
+      markLines.push({
+        xAxis: cursors.b * 1000,
+        lineStyle: { color: cursorColor, type: 'solid', width: 2, opacity: 0.9 },
+        label: {
+          show: true,
+          formatter: 'B',
+          position: 'insideEndTop',
+          color: '#1a1a22',
+          fontWeight: 700,
+          fontSize: 11,
+          backgroundColor: cursorColor,
+          padding: [2, 6, 2, 6],
+          borderRadius: 4,
+        },
+      })
+    }
 
     // Amp ramps → translucent markArea between AmpUpdateStarted.startTime
     // and endTime so the "ramp in progress" window is visible at a glance.
@@ -320,7 +382,43 @@ export function PoolHistoryChart({
         },
       ],
     }
-  }, [snapshots, events])
+  }, [snapshots, events, cursors])
+
+  // ── Compare-mode click handler ─────────────────────────────────────────
+  // Bound via zrender (the low-level canvas layer beneath echarts) so we
+  // catch clicks anywhere inside the plot rectangle, not just on series
+  // points. `containPixel('grid', [x,y])` guards against accidental
+  // clicks on axes / legend; `convertFromPixel` returns the data-domain
+  // timestamp at the clicked x pixel.
+  // echarts' public typings don't surface `getZr` or `convertFromPixel`
+  // narrowly — define a local minimal shape rather than `as any` everything.
+  type ZrEvent = { offsetX: number; offsetY: number }
+  type EChartsLowLevel = ECharts & {
+    getZr: () => {
+      on: (event: 'click', handler: (e: ZrEvent) => void) => void
+      off: (event: 'click', handler: (e: ZrEvent) => void) => void
+    }
+    containPixel: (target: 'grid', point: [number, number]) => boolean
+    convertFromPixel: (axis: { xAxisIndex: 0 }, x: number) => number
+  }
+  const chartRef = useRef<{ getEchartsInstance: () => ECharts } | null>(null)
+  useEffect(() => {
+    if (!onCursorClick) return
+    const instance = chartRef.current?.getEchartsInstance() as EChartsLowLevel | undefined
+    if (!instance) return
+    const handler = (e: ZrEvent): void => {
+      // Only trigger on clicks inside the plot grid — clicks on legend /
+      // axes / outside should be no-ops so users can interact with chart
+      // chrome without accidentally arming a cursor.
+      if (!instance.containPixel('grid', [e.offsetX, e.offsetY])) return
+      const tsMs = instance.convertFromPixel({ xAxisIndex: 0 }, e.offsetX)
+      if (!Number.isFinite(tsMs)) return
+      onCursorClick(Math.round(tsMs / 1000))
+    }
+    const zr = instance.getZr()
+    zr.on('click', handler)
+    return () => zr.off('click', handler)
+  }, [onCursorClick])
 
   if (snapshots.length === 0) {
     return (
@@ -368,7 +466,14 @@ export function PoolHistoryChart({
           notMerge
           option={option}
           opts={{ renderer: 'canvas' }}
-          style={{ height: '100%', width: '100%' }}
+          ref={instance => {
+            // ReactECharts' ref is typed loosely upstream — cast through
+            // `unknown` to the narrow shape the cursor effect expects.
+            chartRef.current = (instance as unknown as {
+              getEchartsInstance: () => ECharts
+            }) ?? null
+          }}
+          style={{ height: '100%', width: '100%', cursor: onCursorClick ? 'crosshair' : 'default' }}
         />
       </Box>
     </Box>

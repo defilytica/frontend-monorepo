@@ -190,12 +190,19 @@ const getBiggestSwapsPayload = unstable_cache(
 
 export async function GET() {
   try {
-    return Response.json(await getBiggestSwapsPayload())
+    // Browser/CDN cache aligned with the server-side `revalidate: 300` —
+    // 5-min freshness with a generous SWR window so navigation back to the
+    // dashboard is instant.
+    return Response.json(await getBiggestSwapsPayload(), {
+      headers: {
+        'Cache-Control': 'public, max-age=300, stale-while-revalidate=1800',
+      },
+    })
   } catch (err) {
     const now = Math.floor(Date.now() / 1000)
     return Response.json(
       { items: [], generatedAt: now, windowSeconds: WINDOW_SECONDS, error: String(err) },
-      { status: 502 }
+      { status: 502, headers: { 'Cache-Control': 'no-store' } }
     )
   }
 }

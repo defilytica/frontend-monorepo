@@ -43,6 +43,7 @@ next-env.d.ts
 .vscode
 .idea
 .aider*
+.claude/
 
 # entry config file
 .sentryclirc

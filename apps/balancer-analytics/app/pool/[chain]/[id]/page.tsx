@@ -27,13 +27,25 @@ import { ChainSlug, getChainSlug } from '@repo/lib/modules/pool/pool.utils'
 import { isDrpcSupportedChain } from '@analytics/lib/contracts/drpc-endpoints'
 import { syncPoolEvents } from '@analytics/lib/pool-events/sync'
 import {
+  readGyroEclpTypeState,
+  readLbpTypeState,
+  readQuantAmmTypeState,
+  readReclammTypeState,
+  readStableSurgeState,
   readStableTypeState,
   readUniversalV3State,
   readV2BasePoolState,
   readV2StableTypeState,
+  readWeightedTypeState,
+  type GyroEclpTypeState,
+  type LbpTypeState,
+  type QuantAmmTypeState,
+  type ReclammTypeState,
+  type StableSurgeState,
   type StableTypeState,
   type UniversalV3State,
   type V2BasePoolState,
+  type WeightedTypeState,
 } from '@analytics/lib/pool-state/read'
 import type { PoolParamEvent } from '@analytics/lib/pool-events/types'
 import { scrubError } from '@analytics/lib/drpc/scrub'
@@ -72,10 +84,23 @@ export type PoolPageData = {
   snapshots: PoolSnapshot[]
   events: PoolParamEvent[]
   lastBlock: number
+  /** True when the page was rendered with `?fullHistory` — both the event
+   *  scan and the snapshot series span the pool's full lifetime rather than
+   *  the default 90-day window. Drives the range label + toggle. */
+  fullHistory: boolean
   state: {
     universal: UniversalV3State | null
     stable: StableTypeState | null
     v2Base: V2BasePoolState | null
+    /** V3 type-specific params for the panel's lower section. At most one
+     *  of these is non-null per pool (dispatched on `poolDetail.type`);
+     *  `stableSurge` is additive on STABLE pools that have the hook. */
+    weighted: WeightedTypeState | null
+    gyroEclp: GyroEclpTypeState | null
+    reclamm: ReclammTypeState | null
+    lbp: LbpTypeState | null
+    quantAmm: QuantAmmTypeState | null
+    stableSurge: StableSurgeState | null
   }
 }
 
@@ -99,32 +124,13 @@ const POOL_DETAIL_QUERY = /* GraphQL */ `
   }
 `
 
-// Fallback for V2 pools when the URL contains just the 42-char address.
-// `poolGetPools` accepts an address filter, returns the canonical 66-char
-// `id` we can then use for downstream `poolGetSnapshots` etc.
-const POOL_BY_ADDRESS_QUERY = /* GraphQL */ `
-  query AnalyticsPoolByAddress($address: String!, $chain: GqlChain!) {
-    pools: poolGetPools(where: { addressIn: [$address], chainIn: [$chain] }, first: 1) {
-      id
-      address
-      name
-      symbol
-      type
-      protocolVersion
-      chain
-      createTime
-      poolTokens {
-        address
-        symbol
-        weight
-      }
-    }
-  }
-`
-
 const SNAPSHOTS_QUERY = /* GraphQL */ `
-  query AnalyticsPoolSnapshots($id: String!, $chain: GqlChain!) {
-    snapshots: poolGetSnapshots(id: $id, chain: $chain, range: NINETY_DAYS) {
+  query AnalyticsPoolSnapshots(
+    $id: String!
+    $chain: GqlChain!
+    $range: GqlPoolSnapshotDataRange!
+  ) {
+    snapshots: poolGetSnapshots(id: $id, chain: $chain, range: $range) {
       timestamp
       totalLiquidity
       volume24h
@@ -143,16 +149,48 @@ function logRpcError(label: string, chain: GqlChain, pool: string, err: unknown)
   console.error(label, { chain, pool, ...scrubError(err) })
 }
 
-async function gqlFetch<T>(query: string, variables: Record<string, unknown>): Promise<T | null> {
+/** Default Next Data Cache TTL for api-v3 GraphQL fetches on this page.
+ *  Pool metadata and daily snapshots both update on the order of hours at
+ *  most; a 60s window lets click-arounds dedupe (key = request body) without
+ *  letting newly-changed pools sit stale long. `?refresh` overrides this to
+ *  `cache: 'no-store'`, preserving the documented bypass path. */
+const POOL_FETCH_REVALIDATE_SECONDS = 60
+
+async function gqlFetch<T>(
+  query: string,
+  variables: Record<string, unknown>,
+  label: string,
+  options: { forceFresh?: boolean } = {}
+): Promise<T | null> {
+  const cacheOptions: RequestInit = options.forceFresh
+    ? { cache: 'no-store' }
+    : { next: { revalidate: POOL_FETCH_REVALIDATE_SECONDS } }
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, variables }),
-    cache: 'no-store',
+    ...cacheOptions,
   })
-  if (!res.ok) return null
+  // Loud about failure modes so a "404: api-v3 has no pool" doesn't hide
+  // (a) Cloudflare rate-limits (429) under heavy dev traffic, or
+  // (b) GraphQL schema drift (e.g. api-v3 removing `addressIn`).
+  // Silent `null` here used to look identical to a legitimate "not found"
+  // in the dev log; that ambiguity bit us on a re-tested pool today.
+  if (!res.ok) {
+    console.warn(`[pool/page] api-v3 ${label} HTTP ${res.status}`, {
+      variables,
+      retryAfter: res.headers.get('retry-after'),
+    })
+    return null
+  }
   const json = (await res.json()) as { data?: T; errors?: unknown }
-  if (json.errors) return null
+  if (json.errors) {
+    console.warn(`[pool/page] api-v3 ${label} GraphQL errors`, {
+      variables,
+      errors: json.errors,
+    })
+    return null
+  }
   return json.data ?? null
 }
 
@@ -166,9 +204,14 @@ export default async function Page({
   const { chain: chainSlug, id } = await params
   const search = await searchParams
   // `?refresh` (or `?refresh=1`) on the URL forces the sync to ignore the
-  // 30s TTL and re-scan from the watermark. Useful for inspecting a pool
+  // 30s TTL and re-scan from the cold floor. Useful for inspecting a pool
   // whose first sync hit a transient drpc error and left the table empty.
   const forceRefresh = search.refresh !== undefined
+  // `?fullHistory` widens both the event scan (→ deployment block) and the
+  // api-v3 snapshot series (→ ALL_TIME) so the chart spans the pool's whole
+  // lifetime. Server-driven, mirroring the `?refresh` pattern — the toggle
+  // is just a link to this URL.
+  const fullHistory = search.fullHistory !== undefined
 
   let chain: GqlChain
   try {
@@ -203,16 +246,20 @@ export default async function Page({
   // bytes. For 42-char input that's the whole string; for 66-char input we
   // slice off the trailing type+nonce bytes.
   const contractAddress = rawId.length === 66 ? rawId.slice(0, 42) : rawId
-  // api-v3 expects the canonical pool id — for V2 that's the 66-char form.
-  // We resolve `apiV3Id` below: try `rawId` first, fall back to an
-  // address-keyed lookup if that returns null (i.e. user passed the 42-char
-  // address of a V2 pool).
-  let apiV3Id = rawId
+  // api-v3 expects the canonical pool id. V3 pools use the 42-char address
+  // as their id (`pool.id === pool.address`); V2/CowAmm pools use the
+  // 66-char form (`address + 2-byte type + 2-byte nonce`). The URL itself
+  // is the canonical id — `poolGetPool(id, chain)` returns the pool for
+  // either shape directly. There used to be a `poolGetPools(where: {
+  // addressIn: [...] })` fallback for users who typed a V2 pool's 42-char
+  // address, but api-v3 removed `addressIn` from `GqlPoolFilter` (verified
+  // via introspection 2026-05-20). With no address-keyed lookup left, V2
+  // pools must be reached via their 66-char poolId; the gqlFetch logging
+  // above surfaces the api-v3 "Pool with id does not exist" error so a
+  // user typing the wrong form sees it in the dev log.
+  const apiV3Id = rawId
 
-  // First pass: query by the URL-supplied id. Falls through with null for
-  // V2 pools when only the 42-char address was passed; the lookup-by-address
-  // recovery runs sequentially after.
-  let detailRes = await gqlFetch<{
+  const detailRes = await gqlFetch<{
     poolGetPool: {
       id: string
       address: string
@@ -224,39 +271,23 @@ export default async function Page({
       createTime: number
       poolTokens: { address: string; symbol: string; weight: string | null }[]
     }
-  }>(POOL_DETAIL_QUERY, { id: apiV3Id, chain })
-
-  if (!detailRes?.poolGetPool && rawId.length === 42) {
-    // Likely a V2 pool referenced by its 42-char address. api-v3 needs the
-    // 66-char poolId — look it up by address filter and re-fetch.
-    const list = await gqlFetch<{
-      pools: {
-        id: string
-        address: string
-        name: string
-        symbol: string
-        type: string
-        protocolVersion: number
-        chain: GqlChain
-        createTime: number
-        poolTokens: { address: string; symbol: string; weight: string | null }[]
-      }[]
-    }>(POOL_BY_ADDRESS_QUERY, { address: contractAddress, chain })
-    const first = list?.pools?.[0]
-    if (first) {
-      apiV3Id = first.id
-      detailRes = { poolGetPool: first }
-    }
-  }
+  }>(POOL_DETAIL_QUERY, { id: apiV3Id, chain }, 'poolGetPool', { forceFresh: forceRefresh })
 
   // Snapshots and sync can run concurrently now that we know the canonical
   // identifiers — separate Promise.all once `apiV3Id` is resolved.
   const [snapshotsRes, syncRes] = await Promise.all([
-    gqlFetch<{ snapshots: PoolSnapshot[] }>(SNAPSHOTS_QUERY, { id: apiV3Id, chain }),
-    syncPoolEvents(chain, contractAddress, { force: forceRefresh }).catch((err: unknown) => {
-      logRpcError('[pool/page] syncPoolEvents failed', chain, contractAddress, err)
-      return { events: [], lastBlock: 0, cached: false, poolType: null, protocolVersion: null }
-    }),
+    gqlFetch<{ snapshots: PoolSnapshot[] }>(
+      SNAPSHOTS_QUERY,
+      { id: apiV3Id, chain, range: fullHistory ? 'ALL_TIME' : 'NINETY_DAYS' },
+      'poolGetSnapshots',
+      { forceFresh: forceRefresh }
+    ),
+    syncPoolEvents(chain, contractAddress, { force: forceRefresh, fullHistory }).catch(
+      (err: unknown) => {
+        logRpcError('[pool/page] syncPoolEvents failed', chain, contractAddress, err)
+        return { events: [], lastBlock: 0, cached: false, poolType: null, protocolVersion: null }
+      }
+    ),
   ])
 
   if (!detailRes?.poolGetPool) {
@@ -264,6 +295,10 @@ export default async function Page({
       chain,
       rawId,
       contractAddress,
+      hint:
+        rawId.length === 42
+          ? 'V3 pools use the 42-char address as id; V2/CowAmm pools require the 66-char poolId. If this is a V2 pool, retry with the full poolId.'
+          : 'check api-v3 logs above (the gqlFetch wrapper logs HTTP errors and GraphQL errors).',
     })
     notFound()
   }
@@ -284,28 +319,50 @@ export default async function Page({
   let universal: UniversalV3State | null = null
   let stable: StableTypeState | null = null
   let v2Base: V2BasePoolState | null = null
+  let weighted: WeightedTypeState | null = null
+  let gyroEclp: GyroEclpTypeState | null = null
+  let reclamm: ReclammTypeState | null = null
+  let lbp: LbpTypeState | null = null
+  let quantAmm: QuantAmmTypeState | null = null
+  let stableSurge: StableSurgeState | null = null
   const isStable = poolDetail.type === 'STABLE' || poolDetail.type === 'COMPOSABLE_STABLE'
 
+  // Wrap a state read so a single reverting helper-contract call degrades to
+  // `null` (panel falls back to universal state) instead of failing render.
+  const rescue = <T,>(label: string, p: Promise<T | null>): Promise<T | null> =>
+    p.catch((err: unknown) => {
+      logRpcError(`[pool/page] ${label} failed`, chain, contractAddress, err)
+      return null
+    })
+
   if (poolDetail.protocolVersion === 3) {
-    const [u, s] = await Promise.all([
-      readUniversalV3State(chain, contractAddress as Address).catch((err: unknown) => {
-        logRpcError('[pool/page] readUniversalV3State failed', chain, contractAddress, err)
-        return null
-      }),
-      isStable
-        ? readStableTypeState(chain, contractAddress as Address).catch((err: unknown) => {
-            logRpcError(
-              '[pool/page] readStableTypeState failed',
-              chain,
-              contractAddress,
-              err
-            )
-            return null
-          })
-        : Promise.resolve(null),
+    const addr = contractAddress as Address
+    const t = poolDetail.type
+    // One read per lane, dispatched on pool type. At most one type-specific
+    // read fires (others resolve to `null` synchronously); `stableSurge` is
+    // additive on STABLE pools and self-nulls when the hook isn't attached.
+    const [u, s, w, ge, rc, l, qa, ss] = await Promise.all([
+      rescue('readUniversalV3State', readUniversalV3State(chain, addr)),
+      isStable ? rescue('readStableTypeState', readStableTypeState(chain, addr)) : null,
+      t === 'WEIGHTED' ? rescue('readWeightedTypeState', readWeightedTypeState(chain, addr)) : null,
+      t === 'GYROE' ? rescue('readGyroEclpTypeState', readGyroEclpTypeState(chain, addr)) : null,
+      t === 'RECLAMM' ? rescue('readReclammTypeState', readReclammTypeState(chain, addr)) : null,
+      t === 'LIQUIDITY_BOOTSTRAPPING'
+        ? rescue('readLbpTypeState', readLbpTypeState(chain, addr))
+        : null,
+      t === 'QUANT_AMM_WEIGHTED'
+        ? rescue('readQuantAmmTypeState', readQuantAmmTypeState(chain, addr))
+        : null,
+      isStable ? rescue('readStableSurgeState', readStableSurgeState(chain, addr)) : null,
     ])
     universal = u
     stable = s
+    weighted = w
+    gyroEclp = ge
+    reclamm = rc
+    lbp = l
+    quantAmm = qa
+    stableSurge = ss
   } else if (poolDetail.protocolVersion === 2) {
     const [b, s] = await Promise.all([
       readV2BasePoolState(chain, contractAddress as Address).catch((err: unknown) => {
@@ -333,7 +390,18 @@ export default async function Page({
     snapshots: snapshotsRes?.snapshots ?? [],
     events: syncRes.events,
     lastBlock: syncRes.lastBlock,
-    state: { universal, stable, v2Base },
+    fullHistory,
+    state: {
+      universal,
+      stable,
+      v2Base,
+      weighted,
+      gyroEclp,
+      reclamm,
+      lbp,
+      quantAmm,
+      stableSurge,
+    },
   }
 
   return <PoolPageView data={data} />

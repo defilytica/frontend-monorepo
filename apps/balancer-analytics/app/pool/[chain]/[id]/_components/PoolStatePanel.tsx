@@ -12,7 +12,15 @@ import {
   Text,
   VStack,
 } from '@chakra-ui/react'
-import type { StableTypeState } from '@analytics/lib/pool-state/read'
+import type {
+  GyroEclpTypeState,
+  LbpTypeState,
+  QuantAmmTypeState,
+  ReclammTypeState,
+  StableSurgeState,
+  StableTypeState,
+  WeightedTypeState,
+} from '@analytics/lib/pool-state/read'
 import type { PoolPageData } from '../page'
 
 // V3 percentages are stored as `1e18`-scaled fixed-point. Divide and format
@@ -41,6 +49,253 @@ function formatTimestamp(unix: number): string {
   })
 }
 
+// 1e18-scaled fixed-point → plain decimal (e.g. ECLP alpha, price ratio).
+function formatScaled(value: string, maxFrac = 4): string {
+  const n = Number(value) / 1e18
+  if (!Number.isFinite(n)) return '—'
+  return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac })
+}
+
+// 1e18-scaled weight → percentage with 2 decimals (e.g. "64.64%").
+function formatWeightPct(value: string): string {
+  const n = Number(value) / 1e18
+  if (!Number.isFinite(n)) return '—'
+  return `${(n * 100).toFixed(2).replace(/\.?0+$/, '')}%`
+}
+
+function formatDuration(seconds: number): string {
+  if (!seconds) return '—'
+  const d = seconds / 86400
+  return `${seconds.toLocaleString()} s · ~${d.toLocaleString(undefined, { maximumFractionDigits: 1 })} d`
+}
+
+type Token = { symbol: string }
+
+/** Token-labelled weight rows. Falls back to positional labels when the
+ *  weight array length doesn't line up with the api-v3 token list. */
+function WeightRows({
+  weights,
+  tokens,
+}: {
+  weights: string[]
+  tokens: Token[]
+}): React.JSX.Element {
+  return (
+    <VStack align="stretch" spacing="2xs">
+      {weights.map((w, i) => (
+        <Flex justify="space-between" key={i}>
+          <Text fontSize="xs" variant="secondary">
+            {tokens[i]?.symbol ?? `token ${i}`}
+          </Text>
+          <Text fontFamily="mono" fontSize="xs">
+            {formatWeightPct(w)}
+          </Text>
+        </Flex>
+      ))}
+    </VStack>
+  )
+}
+
+function TypeSection({
+  title,
+  badge,
+  children,
+}: {
+  title: string
+  badge?: React.ReactNode
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
+      <Flex align="center" justify="space-between" mb="sm">
+        <Text fontSize="xs" fontWeight="600" textTransform="uppercase" variant="secondary">
+          {title}
+        </Text>
+        {badge}
+      </Flex>
+      <Stack divider={<Divider />} spacing="sm">
+        {children}
+      </Stack>
+    </Card>
+  )
+}
+
+function WeightedSection({
+  weighted,
+  tokens,
+}: {
+  weighted: WeightedTypeState
+  tokens: Token[]
+}): React.JSX.Element {
+  return (
+    <TypeSection title="Weights">
+      <WeightRows tokens={tokens} weights={weighted.normalizedWeights} />
+    </TypeSection>
+  )
+}
+
+function GyroEclpSection({ eclp }: { eclp: GyroEclpTypeState }): React.JSX.Element {
+  return (
+    <TypeSection title="ECLP parameters">
+      <StateRow hint="lower price bound" label="alpha" value={formatScaled(eclp.alpha)} />
+      <StateRow hint="upper price bound" label="beta" value={formatScaled(eclp.beta)} />
+      <StateRow hint="stretching factor" label="lambda" value={formatScaled(eclp.lambda)} />
+      <StateRow hint="rotation cos" label="c" value={formatScaled(eclp.c)} />
+      <StateRow hint="rotation sin" label="s" value={formatScaled(eclp.s)} />
+    </TypeSection>
+  )
+}
+
+function ReclammSection({ rc }: { rc: ReclammTypeState }): React.JSX.Element {
+  const updateActive =
+    rc.priceRatio.endTime > 0 && rc.priceRatio.start !== rc.priceRatio.end
+  return (
+    <TypeSection
+      badge={
+        <Badge colorScheme={rc.isWithinTargetRange ? 'green' : 'orange'} size="sm">
+          {rc.isWithinTargetRange ? 'in range' : 'out of range'}
+        </Badge>
+      }
+      title="reCLAMM"
+    >
+      <StateRow
+        hint="current max/min price spread"
+        label="Price ratio"
+        value={formatScaled(rc.currentPriceRatio)}
+      />
+      <StateRow
+        label="Centeredness margin"
+        value={formatWeightPct(rc.centerednessMargin)}
+      />
+      <StateRow
+        hint="max daily price-range drift"
+        label="Daily price shift"
+        value={formatWeightPct(rc.dailyPriceShiftExponent)}
+      />
+      {updateActive && (
+        <Box borderColor="border.base" borderLeft="2px solid" pl="md">
+          <Text fontSize="xs" mb="xs" variant="secondary">
+            Price-ratio update
+          </Text>
+          <VStack align="stretch" spacing="2xs">
+            <Flex justify="space-between">
+              <Text fontSize="xs" variant="secondary">
+                start
+              </Text>
+              <Text fontFamily="mono" fontSize="xs">
+                {formatScaled(rc.priceRatio.start)} · {formatTimestamp(rc.priceRatio.startTime)}
+              </Text>
+            </Flex>
+            <Flex justify="space-between">
+              <Text fontSize="xs" variant="secondary">
+                end
+              </Text>
+              <Text fontFamily="mono" fontSize="xs">
+                {formatScaled(rc.priceRatio.end)} · {formatTimestamp(rc.priceRatio.endTime)}
+              </Text>
+            </Flex>
+          </VStack>
+        </Box>
+      )}
+    </TypeSection>
+  )
+}
+
+function LbpSection({
+  lbp,
+  tokens,
+}: {
+  lbp: LbpTypeState
+  tokens: Token[]
+}): React.JSX.Element {
+  const hasSchedule = lbp.update.startTime > 0
+  return (
+    <TypeSection
+      badge={
+        <Badge colorScheme={lbp.swapEnabled ? 'green' : 'gray'} size="sm">
+          {lbp.swapEnabled ? 'swaps enabled' : 'swaps disabled'}
+        </Badge>
+      }
+      title="LBP weights"
+    >
+      <Box>
+        <Text fontSize="xs" mb="xs" variant="secondary">
+          Current
+        </Text>
+        <WeightRows tokens={tokens} weights={lbp.normalizedWeights} />
+      </Box>
+      {hasSchedule && (
+        <Box borderColor="border.base" borderLeft="2px solid" pl="md">
+          <Text fontSize="xs" mb="xs" variant="secondary">
+            Gradual update · {formatTimestamp(lbp.update.startTime)} →{' '}
+            {formatTimestamp(lbp.update.endTime)}
+          </Text>
+          <VStack align="stretch" spacing="2xs">
+            {lbp.update.startWeights.map((sw, i) => (
+              <Flex justify="space-between" key={i}>
+                <Text fontSize="xs" variant="secondary">
+                  {tokens[i]?.symbol ?? `token ${i}`}
+                </Text>
+                <Text fontFamily="mono" fontSize="xs">
+                  {formatWeightPct(sw)} → {formatWeightPct(lbp.update.endWeights[i] ?? '0')}
+                </Text>
+              </Flex>
+            ))}
+          </VStack>
+        </Box>
+      )}
+    </TypeSection>
+  )
+}
+
+function QuantAmmSection({
+  qa,
+  tokens,
+}: {
+  qa: QuantAmmTypeState
+  tokens: Token[]
+}): React.JSX.Element {
+  return (
+    <TypeSection
+      badge={
+        <Badge colorScheme={qa.withinFixWindow ? 'purple' : 'gray'} size="sm">
+          {qa.withinFixWindow ? 'in fix window' : 'free'}
+        </Badge>
+      }
+      title="QuantAMM weights"
+    >
+      <Box>
+        <Text fontSize="xs" mb="xs" variant="secondary">
+          Current (dynamic)
+        </Text>
+        <WeightRows tokens={tokens} weights={qa.normalizedWeights} />
+      </Box>
+      <StateRow
+        hint="oracle staleness threshold"
+        label="Oracle window"
+        value={formatDuration(qa.oracleStalenessThreshold)}
+      />
+    </TypeSection>
+  )
+}
+
+function StableSurgeSection({ ss }: { ss: StableSurgeState }): React.JSX.Element {
+  return (
+    <TypeSection title="StableSurge hook">
+      <StateRow
+        hint="imbalance above which surge applies"
+        label="Surge threshold"
+        value={formatPercent(ss.surgeThresholdPercentage)}
+      />
+      <StateRow
+        hint="max swap fee while surging"
+        label="Max surge fee"
+        value={formatPercent(ss.maxSurgeFeePercentage)}
+      />
+    </TypeSection>
+  )
+}
+
 function StateRow({
   label,
   value,
@@ -56,8 +311,8 @@ function StateRow({
   // and a hydration error. Render strings via `<Text>` (semantic) and JSX
   // values via `<Box>` (no element constraint).
   return (
-    <Flex align="baseline" gap="sm" justify="space-between">
-      <VStack align="flex-start" spacing="0">
+    <Flex align="baseline" flexWrap="wrap" gap="sm" justify="space-between">
+      <VStack align="flex-start" minW={0} spacing="0">
         <Text fontSize="xs" variant="secondary">
           {label}
         </Text>
@@ -68,11 +323,16 @@ function StateRow({
         )}
       </VStack>
       {typeof value === 'string' ? (
-        <Text fontFamily="mono" fontSize="sm">
+        <Text
+          fontFamily="mono"
+          fontSize="sm"
+          textAlign="right"
+          wordBreak="break-word"
+        >
           {value}
         </Text>
       ) : (
-        <Box fontFamily="mono" fontSize="sm">
+        <Box fontFamily="mono" fontSize="sm" textAlign="right">
           {value}
         </Box>
       )}
@@ -113,11 +373,16 @@ function AmpFactorRows({ stable: s }: { stable: StableTypeState }): React.JSX.El
               Ramp schedule
             </Text>
             <VStack align="stretch" spacing="2xs">
-              <Flex justify="space-between">
+              <Flex flexWrap="wrap" gap="sm" justify="space-between">
                 <Text fontSize="xs" variant="secondary">
                   start
                 </Text>
-                <Text fontFamily="mono" fontSize="xs">
+                <Text
+                  fontFamily="mono"
+                  fontSize="xs"
+                  textAlign="right"
+                  wordBreak="break-word"
+                >
                   {formatAmp(
                     s.amplificationState.startValue,
                     s.amplificationParameter.precision
@@ -125,11 +390,16 @@ function AmpFactorRows({ stable: s }: { stable: StableTypeState }): React.JSX.El
                   · {formatTimestamp(s.amplificationState.startTime)}
                 </Text>
               </Flex>
-              <Flex justify="space-between">
+              <Flex flexWrap="wrap" gap="sm" justify="space-between">
                 <Text fontSize="xs" variant="secondary">
                   end
                 </Text>
-                <Text fontFamily="mono" fontSize="xs">
+                <Text
+                  fontFamily="mono"
+                  fontSize="xs"
+                  textAlign="right"
+                  wordBreak="break-word"
+                >
                   {formatAmp(
                     s.amplificationState.endValue,
                     s.amplificationParameter.precision
@@ -179,7 +449,7 @@ export function PoolStatePanel({
         </Flex>
 
         {isV3 && !u && (
-          <Card p="md" variant="subSection">
+          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
             <Text color="font.secondary" fontSize="sm">
               Current state unavailable — VaultExplorer not configured for {poolDetail.chain}.
             </Text>
@@ -187,7 +457,7 @@ export function PoolStatePanel({
         )}
 
         {isV2 && !v2 && (
-          <Card p="md" variant="subSection">
+          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
             <Text color="font.secondary" fontSize="sm">
               Current state unavailable — V2 pool reads failed.
             </Text>
@@ -195,7 +465,7 @@ export function PoolStatePanel({
         )}
 
         {u && (
-          <Card p="md" variant="subSection">
+          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
             <Stack divider={<Divider />} spacing="sm">
               <StateRow label="Swap fee" value={formatPercent(u.swapFeePercentage)} />
               <StateRow
@@ -227,8 +497,21 @@ export function PoolStatePanel({
           </Card>
         )}
 
+        {/* V3 type-specific lower section — at most one type block, plus the
+            additive StableSurge block on stable pools that have the hook. */}
+        {state.weighted && (
+          <WeightedSection tokens={poolDetail.tokens} weighted={state.weighted} />
+        )}
+        {state.gyroEclp && <GyroEclpSection eclp={state.gyroEclp} />}
+        {state.reclamm && <ReclammSection rc={state.reclamm} />}
+        {state.lbp && <LbpSection lbp={state.lbp} tokens={poolDetail.tokens} />}
+        {state.quantAmm && (
+          <QuantAmmSection qa={state.quantAmm} tokens={poolDetail.tokens} />
+        )}
+        {state.stableSurge && <StableSurgeSection ss={state.stableSurge} />}
+
         {v2 && (
-          <Card p="md" variant="subSection">
+          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
             <Stack divider={<Divider />} spacing="sm">
               <StateRow label="Swap fee" value={formatPercent(v2.swapFeePercentage)} />
               {v2.protocolSwapFeeCache !== null && (

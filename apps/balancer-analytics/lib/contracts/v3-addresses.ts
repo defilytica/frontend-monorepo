@@ -5,20 +5,33 @@
  * (addresses differ from the Vault's CREATE2 constant). Addresses come from
  * `balancer/balancer-deployments` → `addresses/<chain>.json`.
  *
- * Phase B populates mainnet only. Other chains are filled in as we expand
- * coverage; the route handler treats `null` as "helper read unavailable"
- * rather than throwing, so the page still renders the chart + event
- * timeline from log-derived data.
+ * Missing entries are treated as "helper read unavailable" by every
+ * consumer (`runSync`, `readUniversalV3State`, etc.), so the page still
+ * renders the chart + event timeline from log-derived data — only the
+ * universal-state panel and the Filter A address list degrade.
  *
- * Active deployment tasks (mainnet, as of 2026-05-18):
+ * Active deployment tasks (verified on `balancer-deployments`):
  *   - VaultExplorer v2:        20250407-v3-vault-explorer-v2
  *   - ProtocolFeeController v2: 20250214-v3-protocol-fee-controller-v2
  *   - StableSurgeHook v2:       20250403-v3-stable-surge-hook-v2  (active)
- *   - StableSurgeHook (legacy): 20250121-v3-stable-surge          (older pools)
+ *   - StableSurgeHook (legacy): 20250121-v3-stable-surge          (older pools, mainnet/base/arbitrum/gnosis only)
  *
- * The surge hook list keeps the legacy address because pools registered
- * with v1 still emit events from that contract; the log filter passes both
- * addresses in the same `eth_getLogs` call.
+ * The surge hook list keeps the legacy address on the chains where it was
+ * deployed because pools registered with v1 still emit events from that
+ * contract; the log filter passes both addresses in the same
+ * `eth_getLogs` call.
+ *
+ * Chain coverage notes:
+ *   - **Polygon, Fraxtal, Mode, ZkEVM**: api-v3 reports zero V3 pools — V3
+ *     not deployed there. Intentionally absent from the map.
+ *   - **Sonic**: V3 IS live (147 pools per api-v3, canonical V3 vault
+ *     bytecode present on-chain) but **two** blockers prevent shipping:
+ *       (1) `balancer-deployments` has not catalogued the helper
+ *           addresses for Sonic (no `addresses/sonic.json`).
+ *       (2) Sonic is not in `PROJECT_CONFIG.supportedNetworks`
+ *           (`packages/lib/config/projects/balancer.ts`), so the page
+ *           route rejects it with a 404 regardless. Both upstream
+ *           additions are needed before Sonic pools can be browsed here.
  */
 
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
@@ -74,6 +87,27 @@ export const V3_HELPER_ADDRESSES: Partial<Record<GqlChain, V3HelperAddresses>> =
     vaultExplorer: '0x4Cb42fc3b5fb9392Ce0772C3A540E4AE4da4Ac4d',
     protocolFeeController: '0x3630D26E51c03026f4f063d69d65F8E234eEAf5b',
     stableSurgeHooks: ['0x86705Ee19c0509Ff68F1118C55ee2ebdE383D122'],
+  },
+  // ── Chains added 2026-05-20 (handoff §12 #5) ─────────────────────────
+  // Plasma and Monad share addresses (default CREATE2-style deployer
+  // inputs); HyperEVM uses chain-specific addresses. None carry the legacy
+  // StableSurgeHook v1 (those chains came online after the v2 cutover).
+  // Confirmed on-chain: HyperEVM VaultExplorer.getVault() → canonical V3
+  // vault `0xbA1333…ba9`.
+  [GqlChain.Plasma]: {
+    vaultExplorer: '0x043A2daD730d585C44FB79D2614F295D2d625412',
+    protocolFeeController: '0xCaCC7E1efEEA8BB3af6d5720d12C1876aa6EE76b',
+    stableSurgeHooks: ['0x6817149cb753BF529565B4D023d7507eD2ff4Bc0'],
+  },
+  [GqlChain.Monad]: {
+    vaultExplorer: '0x043A2daD730d585C44FB79D2614F295D2d625412',
+    protocolFeeController: '0xCaCC7E1efEEA8BB3af6d5720d12C1876aa6EE76b',
+    stableSurgeHooks: ['0x6817149cb753BF529565B4D023d7507eD2ff4Bc0'],
+  },
+  [GqlChain.Hyperevm]: {
+    vaultExplorer: '0x4bdCc2fb18AEb9e2d281b0278D946445070EAda7',
+    protocolFeeController: '0xCaCC7E1efEEA8BB3af6d5720d12C1876aa6EE76b',
+    stableSurgeHooks: ['0x5DbAd78818D4c8958EfF2d5b95b28385A22113Cd'],
   },
 }
 

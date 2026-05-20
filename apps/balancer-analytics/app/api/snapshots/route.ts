@@ -225,5 +225,13 @@ export async function GET(req: Request) {
   const days = snapDays(url.searchParams.get('days'))
   const granularity = parseGranularity(url.searchParams.get('granularity'))
   const series = await getSnapshotSeries(days, granularity)
-  return Response.json(series)
+  // Browser/CDN cache too — Next's `revalidate` only caches server-side. With
+  // these headers, navigating back to the dashboard within `max-age` reuses
+  // the response without any HTTP roundtrip; the longer `stale-while-revalidate`
+  // window keeps the UI instant while a background refresh happens.
+  return Response.json(series, {
+    headers: {
+      'Cache-Control': 'public, max-age=60, stale-while-revalidate=600',
+    },
+  })
 }
