@@ -654,12 +654,18 @@ export async function readStableSurgeState(
   for (let i = 0; i < results.length; i += 2) {
     const threshold = results[i]
     const maxFee = results[i + 1]
-    if (threshold.status === 'success') {
-      return {
-        surgeThresholdPercentage: (threshold.result as bigint).toString(),
-        maxSurgeFeePercentage:
-          maxFee.status === 'success' ? (maxFee.result as bigint).toString() : '0',
-      }
+    if (threshold.status !== 'success') continue
+    const t = (threshold.result as bigint).toString()
+    const m = maxFee.status === 'success' ? (maxFee.result as bigint).toString() : '0'
+    // The hook's getter falls back to a default-zero response for pools
+    // that aren't actually registered with it (the call doesn't revert —
+    // it just returns zero). Treat both-zero as "not attached" so the
+    // Manage card stops suggesting tunings on plain stable pools that
+    // never opted into the surge hook.
+    if (t === '0' && m === '0') continue
+    return {
+      surgeThresholdPercentage: t,
+      maxSurgeFeePercentage: m,
     }
   }
   return null

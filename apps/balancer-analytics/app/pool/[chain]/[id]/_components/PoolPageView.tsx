@@ -3,27 +3,34 @@
 import {
   Badge,
   Box,
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
   Card,
   Flex,
-  Grid,
-  GridItem,
-  HStack,
   Heading,
+  Spinner,
   Stack,
   Text,
   VStack,
 } from '@chakra-ui/react'
 import Link from 'next/link'
-import { useCallback, useState } from 'react'
+import { ChevronRight, ExternalLink, Home } from 'react-feather'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { useCallback, useState, useTransition } from 'react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
 import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
+import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
+import { NetworkIcon } from '@repo/lib/shared/components/icons/NetworkIcon'
 import { chainToSlugMap } from '@repo/lib/modules/pool/pool.utils'
 import type { PoolPageData } from '../page'
 import { PoolHistoryChart } from './PoolHistoryChart'
 import { PoolStatePanel } from './PoolStatePanel'
 import { PoolEventLog } from './PoolEventLog'
-import { HistoryRangeToggle } from './HistoryRangeToggle'
+import { HistoryRangeToggle, type HistoryRange } from './HistoryRangeToggle'
 import { CompareModeToolbar } from './CompareModeToolbar'
+import { PoolSnapshotTile } from './PoolSnapshotTile'
+import { PoolTokenPillsLite } from '@analytics/app/_components/PoolTokenPillsLite'
 
 function shortAddr(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
@@ -35,9 +42,63 @@ function frontendPoolHref(p: PoolPageData['poolDetail']): string {
   return `https://balancer.fi/pools/${slug}/${variant}/${p.id}`
 }
 
+const PENDING_LABEL: Record<HistoryRange, string> = {
+  '30d': '30 days',
+  '90d': '90 days',
+  '180d': '180 days',
+  '1y': '1 year',
+  all: 'full history',
+}
+
+/** Semi-transparent overlay shown while the server re-renders with a new
+ *  `?range=` searchParam. The first widen past 90 days triggers a deep
+ *  scan that can run multi-second, so a passive "page froze" is worse
+ *  UX than the data taking that long. */
+function RangeChangeOverlay({
+  pendingRange,
+}: {
+  pendingRange: HistoryRange | null
+}): React.JSX.Element {
+  return (
+    <Flex
+      align="center"
+      backdropFilter="blur(2px)"
+      bg="background.level0WithOpacity"
+      direction="column"
+      gap="sm"
+      inset={0}
+      justify="center"
+      position="absolute"
+      rounded="md"
+      zIndex={2}
+    >
+      <Spinner color="font.linkHover" size="lg" thickness="3px" />
+      <Text color="font.secondary" fontSize="sm">
+        Loading {pendingRange ? PENDING_LABEL[pendingRange] : 'range'}…
+      </Text>
+      <Text color="font.secondary" fontSize="2xs" opacity={0.7} textAlign="center">
+        First widen may take a few seconds while the deep scan runs once.
+      </Text>
+    </Flex>
+  )
+}
+
 export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Element {
-  const { poolDetail, snapshots, events, state, fullHistory } = data
-  const tokenSymbols = poolDetail.tokens.map(t => t.symbol).join(' / ')
+  const { poolDetail, snapshots, events, state, range } = data
+  const RANGE_LABEL: Record<typeof range, string> = {
+    '30d': '30-day history',
+    '90d': '90-day history',
+    '180d': '180-day history',
+    '1y': '1-year history',
+    all: 'Full history',
+  }
+  const RANGE_SUBTITLE: Record<typeof range, string> = {
+    '30d': 'last 30 days',
+    '90d': 'last 90 days',
+    '180d': 'last 180 days',
+    '1y': 'last 365 days',
+    all: 'since pool creation',
+  }
 
   // Compare-mode cursor state (Phase E). Click cycle:
   //   0 cursors → set A
@@ -57,55 +118,184 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
   }, [])
   const clearCursors = useCallback(() => setCursors({ a: null, b: null }), [])
 
+  // Range-navigation pending state. The chart/event payloads only update
+  // once the server re-renders with the new searchParam; during that
+  // window we keep the old data visible but overlay a "Loading…" notice
+  // so the user sees that work is in flight. We track only the *last
+  // clicked* range and derive `pendingRange` by comparing it to the
+  // current `range` prop — no effect, no setState-during-effect cascade.
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const [, startTransition] = useTransition()
+  const [clickedRange, setClickedRange] = useState<HistoryRange | null>(null)
+  const pendingRange: HistoryRange | null =
+    clickedRange && clickedRange !== range ? clickedRange : null
+  const handleRangeSelect = useCallback(
+    (next: HistoryRange) => {
+      if (next === range) return
+      // Preserve other params (e.g. `?refresh`) but drop the legacy
+      // `?fullHistory` alias when we set `?range=`.
+      const params = new URLSearchParams(searchParams.toString())
+      params.delete('fullHistory')
+      if (next === '90d') params.delete('range') // 90d is default — keep URL clean
+      else params.set('range', next)
+      const qs = params.toString()
+      const href = qs ? `${pathname}?${qs}` : pathname
+      setClickedRange(next)
+      startTransition(() => router.push(href))
+    },
+    [range, router, pathname, searchParams]
+  )
+  const isRangeChanging = pendingRange !== null
+
   return (
     <DefaultPageContainer pb="2xl" pt={['md', 'lg']}>
       <VStack align="stretch" spacing={{ base: 'lg', md: 'xl' }}>
+        {/* Mini breadcrumb — Home → Pools → this pool. Mirrors
+            frontend-v3 `PoolBreadcrumbs` so analytics users feel at home
+            in the same nav grammar. The home target is `/` (analytics
+            landing) and the Pools anchor jumps to the explorer section
+            on the landing page. */}
         <FadeInOnView animateOnce={false}>
-          <Stack align="flex-start" direction={{ base: 'column', md: 'row' }} spacing="md">
-            <Box flex="1" minW={0}>
-              <HStack mb="xs" spacing="sm">
-                <Badge variant="outline">v{poolDetail.protocolVersion}</Badge>
-                <Badge textTransform="lowercase" variant="outline">
-                  {poolDetail.type}
+          <Breadcrumb
+            color="font.secondary"
+            fontSize="sm"
+            separator={
+              <Box color="border.base">
+                <ChevronRight size={14} />
+              </Box>
+            }
+            spacing="sm"
+          >
+            <BreadcrumbItem>
+              <BreadcrumbLink
+                _hover={{ color: 'font.linkHover' }}
+                as={Link}
+                href="/"
+              >
+                <Home size={14} />
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbItem>
+              <BreadcrumbLink
+                _hover={{ color: 'font.linkHover' }}
+                as={Link}
+                href="/#pools"
+              >
+                Pools
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbItem isCurrentPage>
+              <BreadcrumbLink color="font.primary" cursor="default" href="#">
+                {poolDetail.name}
+              </BreadcrumbLink>
+            </BreadcrumbItem>
+          </Breadcrumb>
+        </FadeInOnView>
+
+        <FadeInOnView animateOnce={false}>
+          <Stack
+            align={{ base: 'flex-start', lg: 'flex-end' }}
+            direction={{ base: 'column', lg: 'row' }}
+            justify="space-between"
+            spacing="md"
+            w="full"
+          >
+            <VStack align="flex-start" minW={0} spacing="sm">
+              {/* Meta badges row — chain icon, protocol version, token
+                  pills (with logos), pool type. Mirrors frontend-v3's
+                  PoolMetaBadges (PoolHeader.tsx) including the
+                  PoolListTokenPills equivalent with overlapping icons
+                  for stable pools and weighted-weight chips. */}
+              <Flex align="center" flexWrap="wrap" gap={{ base: 'xs', sm: 'sm' }}>
+                <NetworkIcon chain={poolDetail.chain} size={6} />
+                <Badge fontSize="xs" px="ms" py="2xs" rounded="full" variant="outline">
+                  v{poolDetail.protocolVersion}
                 </Badge>
-                <Badge textTransform="lowercase" variant="outline">
-                  {poolDetail.chain}
+                <PoolTokenPillsLite tokens={poolDetail.tokens} type={poolDetail.type} />
+                <Badge
+                  fontSize="xs"
+                  px="ms"
+                  py="2xs"
+                  rounded="full"
+                  textTransform="lowercase"
+                  variant="outline"
+                >
+                  {poolDetail.type.replace(/_/g, ' ')}
                 </Badge>
-              </HStack>
+              </Flex>
               <Heading
-                pb="xs"
                 size="h3"
                 sx={{ textWrap: 'balance' }}
                 variant="special"
               >
                 {poolDetail.name}
               </Heading>
-              <Text sx={{ textWrap: 'balance' }} variant="secondary">
-                {tokenSymbols} — parameter timeline and impact
+              <Text fontSize="sm" sx={{ textWrap: 'balance' }} variant="secondary">
+                Parameter timeline and impact analysis
               </Text>
-            </Box>
-            <VStack align={{ base: 'flex-start', md: 'flex-end' }} spacing="xs">
+            </VStack>
+            <VStack align={{ base: 'flex-start', lg: 'flex-end' }} spacing="xs">
               <Link href={frontendPoolHref(poolDetail)} rel="noreferrer" target="_blank">
-                <Text _hover={{ color: 'font.linkHover' }} fontSize="sm" variant="secondary">
-                  Open in balancer.fi →
-                </Text>
+                <Flex
+                  _hover={{ color: 'font.linkHover', borderColor: 'font.linkHover' }}
+                  align="center"
+                  border="1px solid"
+                  borderColor="border.base"
+                  color="font.secondary"
+                  fontSize="xs"
+                  fontWeight="500"
+                  gap="xs"
+                  px="ms"
+                  py="2xs"
+                  rounded="full"
+                  transition="color 0.15s, border-color 0.15s"
+                >
+                  Open in balancer.fi
+                  <ExternalLink size={12} />
+                </Flex>
               </Link>
-              <Text fontFamily="mono" fontSize="xs" variant="secondary">
+              <Text fontFamily="mono" fontSize="2xs" variant="secondary">
                 {shortAddr(poolDetail.address)}
               </Text>
             </VStack>
           </Stack>
         </FadeInOnView>
 
-        <Grid gap={{ base: 'md', md: 'lg' }} templateColumns={{ base: '1fr', xl: '1fr 340px' }}>
-          <GridItem minW={0}>
-            <FadeInOnView animateOnce={false}>
-              <Card
-                overflow="hidden"
-                p={{ base: 'sm', md: 'md' }}
-                variant="level1"
+        {/* Bento: pool snapshot tile (left) + history chart card (right).
+            Matches frontend-v3's PoolStatsLayout. Stacks vertically on
+            narrow viewports; row layout from md upward with a fixed
+            height so the snapshot and chart visually tie together. */}
+        <FadeInOnView animateOnce={false}>
+          <Stack
+            direction={{ base: 'column', md: 'row' }}
+            h={{ md: '484px' }}
+            spacing="md"
+            w="full"
+          >
+            {/* Snapshot tile narrower (was `md` ≈ 448px) so the chart card —
+                the page's primary visual — gets the breathing room it
+                deserves. 260px is enough for an h4 USD heading + delta
+                pill without wrapping. */}
+            <PoolSnapshotTile
+              events={events}
+              flexShrink={0}
+              snapshots={snapshots}
+              w={{ base: 'full', md: '260px' }}
+            />
+            <Card flex="1" minW={0} overflow="hidden" variant="level1">
+              <NoisyCard
+                cardProps={{ height: 'full', overflow: 'hidden' }}
+                contentProps={{ display: 'flex' }}
               >
-                <VStack align="stretch" spacing="md">
+                <VStack
+                  align="stretch"
+                  h="full"
+                  p={{ base: 'sm', md: 'md' }}
+                  spacing="md"
+                  w="full"
+                >
                   <Flex
                     align={{ base: 'flex-start', md: 'center' }}
                     direction={{ base: 'column', md: 'row' }}
@@ -113,35 +303,37 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
                     justify="space-between"
                   >
                     <VStack align="flex-start" spacing="xs">
-                      <Heading size="h5">
-                        {fullHistory ? 'Full history' : '90-day history'}
-                      </Heading>
+                      <Heading size="h5">{RANGE_LABEL[range]}</Heading>
                       <Text color="font.secondary" fontSize="xs">
                         {events.length.toLocaleString()} parameter event
-                        {events.length === 1 ? '' : 's'} indexed
-                        {fullHistory ? ' · since pool creation' : ' · last 90 days'}
+                        {events.length === 1 ? '' : 's'} indexed · {RANGE_SUBTITLE[range]}
                       </Text>
                     </VStack>
-                    <HistoryRangeToggle fullHistory={fullHistory} />
+                    <HistoryRangeToggle
+                      onSelect={handleRangeSelect}
+                      pendingRange={pendingRange}
+                      range={range}
+                    />
                   </Flex>
-                  <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
+                  <Box flex="1" minH={0} position="relative">
                     <PoolHistoryChart
                       cursors={cursors}
                       events={events}
                       onCursorClick={handleCursorClick}
                       snapshots={snapshots}
                     />
-                  </Card>
+                    {isRangeChanging && <RangeChangeOverlay pendingRange={pendingRange} />}
+                  </Box>
                 </VStack>
-              </Card>
-            </FadeInOnView>
-          </GridItem>
-          <GridItem>
-            <FadeInOnView animateOnce={false}>
-              <PoolStatePanel poolDetail={poolDetail} state={state} />
-            </FadeInOnView>
-          </GridItem>
-        </Grid>
+              </NoisyCard>
+            </Card>
+          </Stack>
+        </FadeInOnView>
+
+        {/* Current state — full-width card below the chart. */}
+        <FadeInOnView animateOnce={false}>
+          <PoolStatePanel poolDetail={poolDetail} state={state} />
+        </FadeInOnView>
 
         {(cursors.a !== null || cursors.b !== null) && (
           <FadeInOnView animateOnce={false}>

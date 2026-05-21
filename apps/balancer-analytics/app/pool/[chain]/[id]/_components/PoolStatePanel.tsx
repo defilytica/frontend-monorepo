@@ -3,15 +3,19 @@
 import {
   Badge,
   Box,
+  Button,
   Card,
   Divider,
   Flex,
   HStack,
   Heading,
+  SimpleGrid,
   Stack,
   Text,
   VStack,
 } from '@chakra-ui/react'
+import Link from 'next/link'
+import { ExternalLink } from 'react-feather'
 import type {
   GyroEclpTypeState,
   LbpTypeState,
@@ -22,6 +26,80 @@ import type {
   WeightedTypeState,
 } from '@analytics/lib/pool-state/read'
 import type { PoolPageData } from '../page'
+
+// Block-explorer URL stems per chain (mirrors the per-chain map in
+// PoolEventLog so the analytics surface uses one address-link target).
+const EXPLORER_ADDRESS_URL: Partial<Record<string, string>> = {
+  MAINNET: 'https://etherscan.io/address/',
+  ARBITRUM: 'https://arbiscan.io/address/',
+  AVALANCHE: 'https://snowtrace.io/address/',
+  BASE: 'https://basescan.org/address/',
+  GNOSIS: 'https://gnosisscan.io/address/',
+  OPTIMISM: 'https://optimistic.etherscan.io/address/',
+  POLYGON: 'https://polygonscan.com/address/',
+  SEPOLIA: 'https://sepolia.etherscan.io/address/',
+  FRAXTAL: 'https://fraxscan.com/address/',
+  MODE: 'https://explorer.mode.network/address/',
+  ZKEVM: 'https://zkevm.polygonscan.com/address/',
+  SONIC: 'https://sonicscan.org/address/',
+  HYPEREVM: 'https://hyperliquid.cloud.blockscout.com/address/',
+  PLASMA: 'https://plasmascan.to/address/',
+  MONAD: 'https://testnet.monadexplorer.com/address/',
+}
+
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000'
+
+function shortAddr(addr: string): string {
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`
+}
+
+function AddressLink({
+  address,
+  chain,
+  zeroLabel = 'Balancer DAO',
+  zeroHint = 'Controlled by the Authorizer (Omni governance)',
+}: {
+  address: string | null
+  chain: string
+  /** Label shown when `address` is `0x000…000`. Manager roles delegate
+   *  to the DAO Authorizer at the zero address, not "no one"; factories
+   *  override this to `"—"` since address(0) there really means missing. */
+  zeroLabel?: string
+  zeroHint?: string
+}): React.JSX.Element {
+  if (!address || address.toLowerCase() === ZERO_ADDR) {
+    return (
+      <Text color="font.secondary" fontSize="sm" title={zeroHint}>
+        {zeroLabel}
+      </Text>
+    )
+  }
+  const base = EXPLORER_ADDRESS_URL[chain]
+  const label = shortAddr(address)
+  if (!base) {
+    return (
+      <Text fontFamily="mono" fontSize="sm">
+        {label}
+      </Text>
+    )
+  }
+  return (
+    <Link href={`${base}${address}`} rel="noreferrer" target="_blank">
+      <Flex
+        _hover={{ color: 'font.linkHover' }}
+        align="center"
+        color="font.primary"
+        fontFamily="mono"
+        fontSize="sm"
+        gap="2xs"
+        transition="color 0.15s"
+      >
+        {label}
+        <ExternalLink size={11} />
+      </Flex>
+    </Link>
+  )
+}
 
 // V3 percentages are stored as `1e18`-scaled fixed-point. Divide and format
 // as a percentage with up to 4 decimal places (covers down to 0.01 bp).
@@ -96,6 +174,19 @@ function WeightRows({
   )
 }
 
+/**
+ * Flat panel section — no inner Card, no double-border. Adopts the
+ * frontend-v3 PoolAttributes pattern: small heading, divider, then a
+ * list of key/value rows. Visually distinct from neighbouring sections
+ * via the outer Card's divider stack, not an inner border.
+ */
+/**
+ * Self-contained section card. Each section (Fee parameters, Permissions,
+ * Weights, ECLP, reCLAMM, …) renders as its own free-standing Card so
+ * `PoolStatePanel` can lay them out in a `SimpleGrid` — independent
+ * grouping, no single-column tower of rows, and visually obvious which
+ * params belong together.
+ */
 function TypeSection({
   title,
   badge,
@@ -106,17 +197,116 @@ function TypeSection({
   children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
-      <Flex align="center" justify="space-between" mb="sm">
-        <Text fontSize="xs" fontWeight="600" textTransform="uppercase" variant="secondary">
-          {title}
-        </Text>
-        {badge}
-      </Flex>
-      <Stack divider={<Divider />} spacing="sm">
-        {children}
-      </Stack>
+    <Card h="full" overflow="hidden" p={{ base: 'md', md: 'md' }} variant="subSection">
+      <VStack align="stretch" h="full" spacing="sm" w="full">
+        <Flex align="center" justify="space-between">
+          <Heading
+            fontSize="sm"
+            fontWeight={600}
+            letterSpacing="0.04em"
+            textTransform="uppercase"
+          >
+            {title}
+          </Heading>
+          {badge}
+        </Flex>
+        <Divider opacity={0.4} />
+        <Stack align="stretch" spacing="sm" w="full">
+          {children}
+        </Stack>
+      </VStack>
     </Card>
+  )
+}
+
+// ── Manage-parameters deep links to ops.balancer.fi ──────────────────
+//
+// Builders shipped by the Balancer ops team. Per-pool links carry both
+// the network slug (lowercase GqlChain — matches ops.balancer.fi's
+// convention) and the 20-byte address.
+
+const OPS_BASE = 'https://ops.balancer.fi'
+
+type ManageLink = { label: string; hint: string; href: string }
+
+/** Inline action button — appended after the rows of a section card to
+ *  give users a direct deep-link into ops.balancer.fi's payload builder
+ *  for whatever that section controls. Looks like a standard Chakra
+ *  outline Button (label left, external-link icon right). */
+function ManageButton({ link }: { link: ManageLink }): React.JSX.Element {
+  return (
+    <Button
+      as="a"
+      fontSize="sm"
+      fontWeight={500}
+      href={link.href}
+      justifyContent="space-between"
+      rel="noreferrer"
+      rightIcon={<ExternalLink size={12} />}
+      size="md"
+      target="_blank"
+      title={link.hint}
+      variant="outline"
+      w="full"
+    >
+      {link.label}
+    </Button>
+  )
+}
+
+/**
+ * Permissions + deployment metadata sourced from api-v3 (factory,
+ * swapFeeManager, pauseManager, poolCreator, version). Always renders
+ * for a successfully resolved pool — answers "who can change what?"
+ * which the existing "current values" cards above don't.
+ */
+function PermissionsSection({
+  poolDetail,
+}: {
+  poolDetail: PoolPageData['poolDetail']
+}): React.JSX.Element {
+  const chain = poolDetail.chain as string
+  const showVersion = typeof poolDetail.version === 'number' && poolDetail.version > 0
+  return (
+    // Single-column inside the section card — Permissions sits in a
+    // half-width grid cell on lg+, so a 2-column inner grid would push
+    // labels and addresses uncomfortably tight.
+    <TypeSection title="Permissions & deployment">
+      {showVersion && (
+        <StateRow
+          hint="protocol sub-version"
+          label="Version"
+          value={`v${poolDetail.protocolVersion}.${poolDetail.version}`}
+        />
+      )}
+      <StateRow
+        hint="deployer contract"
+        label="Factory"
+        value={
+          <AddressLink
+            address={poolDetail.factory}
+            chain={chain}
+            zeroHint="No factory recorded"
+            zeroLabel="—"
+          />
+        }
+      />
+      <StateRow
+        hint="can change the swap fee"
+        label="Swap-fee manager"
+        value={<AddressLink address={poolDetail.swapFeeManager} chain={chain} />}
+      />
+      <StateRow
+        hint="can pause the pool"
+        label="Pause manager"
+        value={<AddressLink address={poolDetail.pauseManager} chain={chain} />}
+      />
+      <StateRow
+        hint="original creator"
+        label="Pool creator"
+        value={<AddressLink address={poolDetail.poolCreator} chain={chain} />}
+      />
+    </TypeSection>
   )
 }
 
@@ -146,7 +336,13 @@ function GyroEclpSection({ eclp }: { eclp: GyroEclpTypeState }): React.JSX.Eleme
   )
 }
 
-function ReclammSection({ rc }: { rc: ReclammTypeState }): React.JSX.Element {
+function ReclammSection({
+  rc,
+  manageButton,
+}: {
+  rc: ReclammTypeState
+  manageButton?: React.ReactNode
+}): React.JSX.Element {
   const updateActive =
     rc.priceRatio.endTime > 0 && rc.priceRatio.start !== rc.priceRatio.end
   return (
@@ -197,6 +393,7 @@ function ReclammSection({ rc }: { rc: ReclammTypeState }): React.JSX.Element {
           </VStack>
         </Box>
       )}
+      {manageButton}
     </TypeSection>
   )
 }
@@ -279,7 +476,13 @@ function QuantAmmSection({
   )
 }
 
-function StableSurgeSection({ ss }: { ss: StableSurgeState }): React.JSX.Element {
+function StableSurgeSection({
+  ss,
+  manageButton,
+}: {
+  ss: StableSurgeState
+  manageButton?: React.ReactNode
+}): React.JSX.Element {
   return (
     <TypeSection title="StableSurge hook">
       <StateRow
@@ -292,9 +495,18 @@ function StableSurgeSection({ ss }: { ss: StableSurgeState }): React.JSX.Element
         label="Max surge fee"
         value={formatPercent(ss.maxSurgeFeePercentage)}
       />
+      {manageButton}
     </TypeSection>
   )
 }
+
+// Fixed pixel width for the label column on `md+`. Using exact width
+// (not `minWidth`) so every section's rows align to the same x-position
+// regardless of label content. 160px matches frontend-v3's
+// PoolAttributes convention and comfortably fits every label we render
+// today (longest are ~130px — "Pool-creator yield", "Swap-fee manager",
+// "Aggregate swap fee").
+const STATE_LABEL_WIDTH = '160px'
 
 function StateRow({
   label,
@@ -305,38 +517,39 @@ function StateRow({
   value: string | React.ReactNode
   hint?: string
 }): React.JSX.Element {
-  // The value wrapper used to be a `<Text>` (renders as `<p>`). When `value`
-  // is JSX containing another `<Text>` (e.g. the amp factor cell with its
-  // "updating" badge), we ended up with `<p>` inside `<p>` — invalid HTML
-  // and a hydration error. Render strings via `<Text>` (semantic) and JSX
-  // values via `<Box>` (no element constraint).
+  // Mirrors frontend-v3 `PoolAttributes` row exactly: `direction='row'`
+  // on `md+` with no `align` prop (Chakra's default `flex-start` lines
+  // the value's first text line up with the label's first text line),
+  // a fixed-width label box on `md+`, `:` suffix on the label, and the
+  // value sitting flush after a `md` spacing gap. No `flex` or
+  // `textAlign='right'` on the value — values therefore start at the
+  // same x position across every row.
   return (
-    <Flex align="baseline" flexWrap="wrap" gap="sm" justify="space-between">
-      <VStack align="flex-start" minW={0} spacing="0">
-        <Text fontSize="xs" variant="secondary">
-          {label}
+    <Stack
+      direction={{ base: 'column', md: 'row' }}
+      spacing={{ base: '2xs', md: 'md' }}
+      w="full"
+    >
+      <Box flexShrink={0} w={{ md: STATE_LABEL_WIDTH }}>
+        <Text color="font.secondary" fontSize="sm">
+          {label}:
         </Text>
         {hint && (
-          <Text fontSize="2xs" opacity={0.7} variant="secondary">
+          <Text color="font.secondary" fontSize="2xs" opacity={0.7}>
             {hint}
           </Text>
         )}
-      </VStack>
+      </Box>
       {typeof value === 'string' ? (
-        <Text
-          fontFamily="mono"
-          fontSize="sm"
-          textAlign="right"
-          wordBreak="break-word"
-        >
+        <Text fontFamily="mono" fontSize="sm" minW={0} wordBreak="break-word">
           {value}
         </Text>
       ) : (
-        <Box fontFamily="mono" fontSize="sm" textAlign="right">
+        <Box fontFamily="mono" fontSize="sm" minW={0}>
           {value}
         </Box>
       )}
-    </Flex>
+    </Stack>
   )
 }
 
@@ -434,113 +647,173 @@ export function PoolStatePanel({
   const isInRecovery = u?.isInRecoveryMode ?? v2?.isInRecoveryMode ?? false
   const hasAnyState = u || v2
 
+  // ── Inline manage buttons (ops.balancer.fi payload builders) ────────
+  // Previously these lived in a dedicated "Manage parameters" card;
+  // pulled into the relevant section cards now (fee setter → Fee
+  // parameters, surge tuning → StableSurge hook, reCLAMM payload →
+  // reCLAMM) so the card grid stays compact and each action sits next
+  // to the values it changes.
+  const opsNetwork = poolDetail.chain.toLowerCase()
+  const feeSetterButton = (
+    <ManageButton
+      link={
+        poolDetail.protocolVersion === 3
+          ? {
+              label: 'Set static swap fee',
+              hint: 'V3 fee-setter payload builder',
+              href: `${OPS_BASE}/payload-builder/fee-setter-v3`,
+            }
+          : {
+              label: 'Set static swap fee',
+              hint: 'V2 fee-setter payload builder',
+              href: `${OPS_BASE}/payload-builder/fee-setter`,
+            }
+      }
+    />
+  )
+  const surgeManageButton = state.stableSurge ? (
+    <ManageButton
+      link={{
+        label: 'Tune StableSurge thresholds',
+        hint: 'Surge hook payload builder',
+        href: `${OPS_BASE}/hooks/stable-surge?network=${opsNetwork}&pool=${poolDetail.address}`,
+      }}
+    />
+  ) : null
+  const reclammManageButton = state.reclamm ? (
+    <ManageButton
+      link={{
+        label: 'Manage reCLAMM',
+        hint: 'reCLAMM payload builder',
+        href: `${OPS_BASE}/payload-builder/reclamm?network=${opsNetwork}&pool=${poolDetail.address}`,
+      }}
+    />
+  ) : null
+
+  // Each `state.*` slot is at most one block per pool — gather the
+  // type-specific Card to render in the grid as a single ReactNode so
+  // the grid composition stays declarative below.
+  let typeSpecificCard: React.ReactNode = null
+  if (state.weighted) {
+    typeSpecificCard = (
+      <WeightedSection tokens={poolDetail.tokens} weighted={state.weighted} />
+    )
+  } else if (state.gyroEclp) {
+    typeSpecificCard = <GyroEclpSection eclp={state.gyroEclp} />
+  } else if (state.reclamm) {
+    typeSpecificCard = (
+      <ReclammSection manageButton={reclammManageButton} rc={state.reclamm} />
+    )
+  } else if (state.lbp) {
+    typeSpecificCard = <LbpSection lbp={state.lbp} tokens={poolDetail.tokens} />
+  } else if (state.quantAmm) {
+    typeSpecificCard = <QuantAmmSection qa={state.quantAmm} tokens={poolDetail.tokens} />
+  }
+
   return (
-    <Card overflow="hidden" p={{ base: 'sm', md: 'md' }} variant="level1">
-      <VStack align="stretch" spacing="md">
-        <Flex align="center" justify="space-between">
-          <Heading size="h5">Current state</Heading>
-          {hasAnyState && (
-            <HStack spacing="xs">
-              {isPaused && <Badge colorScheme="red">paused</Badge>}
-              {isInRecovery && <Badge colorScheme="orange">recovery</Badge>}
-              {!isPaused && !isInRecovery && <Badge colorScheme="green">active</Badge>}
-            </HStack>
-          )}
-        </Flex>
-
-        {isV3 && !u && (
-          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
-            <Text color="font.secondary" fontSize="sm">
-              Current state unavailable — VaultExplorer not configured for {poolDetail.chain}.
-            </Text>
-          </Card>
+    // No outer Card — the heading floats above a grid of independent
+    // section cards (frontend-v3 PoolInfo pattern). Manage stays
+    // full-width because its action rows benefit from horizontal space;
+    // the rest live in a 2-column grid that wraps on narrow viewports.
+    <VStack align="stretch" spacing="md" w="full">
+      <Flex align="center" justify="space-between">
+        <Heading fontSize="1.25rem" variant="h4">
+          Current state
+        </Heading>
+        {hasAnyState && (
+          <HStack spacing="xs">
+            {isPaused && <Badge colorScheme="red">paused</Badge>}
+            {isInRecovery && <Badge colorScheme="orange">recovery</Badge>}
+            {!isPaused && !isInRecovery && <Badge colorScheme="green">active</Badge>}
+          </HStack>
         )}
+      </Flex>
 
-        {isV2 && !v2 && (
-          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
-            <Text color="font.secondary" fontSize="sm">
-              Current state unavailable — V2 pool reads failed.
-            </Text>
-          </Card>
-        )}
+      {isV3 && !u && (
+        <Text color="font.secondary" fontSize="sm">
+          Current state unavailable — VaultExplorer not configured for {poolDetail.chain}.
+        </Text>
+      )}
 
+      {isV2 && !v2 && (
+        <Text color="font.secondary" fontSize="sm">
+          Current state unavailable — V2 pool reads failed.
+        </Text>
+      )}
+
+      {/* Section cards — each is a peer in the 2-col grid. Manage
+          actions live inside the section they affect rather than in a
+          separate Manage card (fee setter → Fee parameters; surge
+          tuning → StableSurge hook; reCLAMM payload → reCLAMM). */}
+      <SimpleGrid columns={{ base: 1, lg: 2 }} spacing="md" w="full">
         {u && (
-          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
-            <Stack divider={<Divider />} spacing="sm">
-              <StateRow label="Swap fee" value={formatPercent(u.swapFeePercentage)} />
-              <StateRow
-                hint="protocol + creator on swaps"
-                label="Aggregate swap fee"
-                value={formatPercent(u.aggregateSwapFeePercentage)}
-              />
-              <StateRow
-                hint="protocol + creator on rate-provider yield"
-                label="Aggregate yield fee"
-                value={formatPercent(u.aggregateYieldFeePercentage)}
-              />
-              {s && <AmpFactorRows stable={s} />}
-              {(u.poolCreatorSwapFeePercentage !== null ||
-                u.poolCreatorYieldFeePercentage !== null) && (
-                <>
-                  <Divider />
-                  <StateRow
-                    label="Pool-creator swap"
-                    value={formatPercent(u.poolCreatorSwapFeePercentage)}
-                  />
-                  <StateRow
-                    label="Pool-creator yield"
-                    value={formatPercent(u.poolCreatorYieldFeePercentage)}
-                  />
-                </>
-              )}
-            </Stack>
-          </Card>
+          <TypeSection title="Fee parameters">
+            <StateRow label="Swap fee" value={formatPercent(u.swapFeePercentage)} />
+            <StateRow
+              hint="protocol + creator on swaps"
+              label="Aggregate swap fee"
+              value={formatPercent(u.aggregateSwapFeePercentage)}
+            />
+            <StateRow
+              hint="protocol + creator on rate-provider yield"
+              label="Aggregate yield fee"
+              value={formatPercent(u.aggregateYieldFeePercentage)}
+            />
+            {s && <AmpFactorRows stable={s} />}
+            {(u.poolCreatorSwapFeePercentage !== null ||
+              u.poolCreatorYieldFeePercentage !== null) && (
+              <>
+                <StateRow
+                  label="Pool-creator swap"
+                  value={formatPercent(u.poolCreatorSwapFeePercentage)}
+                />
+                <StateRow
+                  label="Pool-creator yield"
+                  value={formatPercent(u.poolCreatorYieldFeePercentage)}
+                />
+              </>
+            )}
+            {feeSetterButton}
+          </TypeSection>
         )}
-
-        {/* V3 type-specific lower section — at most one type block, plus the
-            additive StableSurge block on stable pools that have the hook. */}
-        {state.weighted && (
-          <WeightedSection tokens={poolDetail.tokens} weighted={state.weighted} />
-        )}
-        {state.gyroEclp && <GyroEclpSection eclp={state.gyroEclp} />}
-        {state.reclamm && <ReclammSection rc={state.reclamm} />}
-        {state.lbp && <LbpSection lbp={state.lbp} tokens={poolDetail.tokens} />}
-        {state.quantAmm && (
-          <QuantAmmSection qa={state.quantAmm} tokens={poolDetail.tokens} />
-        )}
-        {state.stableSurge && <StableSurgeSection ss={state.stableSurge} />}
 
         {v2 && (
-          <Card p={{ base: 'sm', md: 'md' }} variant="subSection">
-            <Stack divider={<Divider />} spacing="sm">
-              <StateRow label="Swap fee" value={formatPercent(v2.swapFeePercentage)} />
-              {v2.protocolSwapFeeCache !== null && (
-                <StateRow
-                  hint="last cached value on this pool"
-                  label="Protocol swap fee"
-                  value={formatPercent(v2.protocolSwapFeeCache)}
-                />
-              )}
-              {v2.protocolYieldFeeCache !== null &&
-                v2.protocolYieldFeeCache !== '0' && (
-                  <StateRow
-                    hint="last cached value on this pool"
-                    label="Protocol yield fee"
-                    value={formatPercent(v2.protocolYieldFeeCache)}
-                  />
-                )}
-              {v2.pauseWindowEndTime > 0 && (
-                <StateRow
-                  hint="emergency pause is available until"
-                  label="Pause window ends"
-                  value={formatTimestamp(v2.pauseWindowEndTime)}
-                />
-              )}
-              {s && <AmpFactorRows stable={s} />}
-            </Stack>
-          </Card>
+          <TypeSection title="Fee parameters">
+            <StateRow label="Swap fee" value={formatPercent(v2.swapFeePercentage)} />
+            {v2.protocolSwapFeeCache !== null && (
+              <StateRow
+                hint="last cached value on this pool"
+                label="Protocol swap fee"
+                value={formatPercent(v2.protocolSwapFeeCache)}
+              />
+            )}
+            {v2.protocolYieldFeeCache !== null && v2.protocolYieldFeeCache !== '0' && (
+              <StateRow
+                hint="last cached value on this pool"
+                label="Protocol yield fee"
+                value={formatPercent(v2.protocolYieldFeeCache)}
+              />
+            )}
+            {v2.pauseWindowEndTime > 0 && (
+              <StateRow
+                hint="emergency pause is available until"
+                label="Pause window ends"
+                value={formatTimestamp(v2.pauseWindowEndTime)}
+              />
+            )}
+            {s && <AmpFactorRows stable={s} />}
+            {feeSetterButton}
+          </TypeSection>
         )}
-      </VStack>
-    </Card>
+
+        <PermissionsSection poolDetail={poolDetail} />
+
+        {typeSpecificCard}
+
+        {state.stableSurge && (
+          <StableSurgeSection manageButton={surgeManageButton} ss={state.stableSurge} />
+        )}
+      </SimpleGrid>
+    </VStack>
   )
 }

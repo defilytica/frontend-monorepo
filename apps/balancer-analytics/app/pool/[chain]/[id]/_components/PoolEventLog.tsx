@@ -2,15 +2,22 @@
 
 import {
   Box,
+  Button,
   Card,
+  Checkbox,
   Flex,
   Grid,
   GridItem,
   HStack,
   Heading,
+  Menu,
+  MenuButton,
+  MenuItem,
+  MenuList,
   Text,
   VStack,
 } from '@chakra-ui/react'
+import { ChevronDownIcon } from '@chakra-ui/icons'
 import Link from 'next/link'
 import { useCallback, useMemo, useState } from 'react'
 import { PaginatedTable } from '@repo/lib/shared/components/tables/PaginatedTable'
@@ -20,12 +27,24 @@ import type { PoolParamEvent } from '@analytics/lib/pool-events/types'
 import { CATEGORY_ORDER, getEventStyle, type EventCategory } from './eventStyles'
 import { formatEventArgValue } from './formatEventArgs'
 
-const dateFmt = new Intl.DateTimeFormat(undefined, {
+// Compact fixed-width DD.MM.YYYY, HH:mm — locale-independent, mono-friendly,
+// dates line up cleanly down the column. Intl's locale formatting can drift
+// between "Sep 22 2026, 12:01 PM" / "22 Sept 12:01" / etc. depending on
+// browser locale; this hand-rolled formatter keeps the visual stable.
+const pad2 = (n: number): string => (n < 10 ? `0${n}` : `${n}`)
+function fmtWhen(unixSec: number): string {
+  const d = new Date(unixSec * 1000)
+  return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+// Full timestamp for the hover tooltip — includes seconds + locale wording
+// so power users can copy a precise time from the title attribute.
+const dateFullFmt = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
   month: 'short',
   day: 'numeric',
-  year: 'numeric',
   hour: 'numeric',
   minute: '2-digit',
+  second: '2-digit',
 })
 
 const EXPLORER_URL: Partial<Record<string, string>> = {
@@ -60,6 +79,24 @@ const CATEGORY_LABELS: Record<EventCategory, string> = {
   other: 'Other',
 }
 
+// One representative color per category — pulled from the per-event
+// palette in `eventStyles.ts` so the chip color matches what users see on
+// the pins and the row dots for events in that category.
+const CATEGORY_COLOR: Record<EventCategory, string> = {
+  fee: '#7c6ff5',
+  amp: '#f59e0b',
+  state: '#ef4444',
+  surge: '#ec4899',
+  rate: '#10b981',
+  registration: '#64748b',
+  other: '#94a3b8',
+}
+
+// Above this many present categories, the chip strip switches to a
+// dropdown to stay compact. Pools with ≤ this many keep the at-a-glance
+// inline strip.
+const INLINE_CHIP_THRESHOLD = 4
+
 // Responsive grid columns mirror the PoolExplorer pattern: same template
 // for header and body, with `minmax(0, 1fr)` on Args so it absorbs
 // leftover horizontal space gracefully. On `base` we collapse to a single
@@ -67,7 +104,112 @@ const CATEGORY_LABELS: Record<EventCategory, string> = {
 // horizontal scroll just to read one event.
 const GRID_COLS = {
   base: '1fr',
-  md: '180px 240px minmax(0, 1fr) 140px',
+  // 170px gives `DD.MM.YYYY, HH:mm` mono enough room without wrapping.
+  md: '170px 220px minmax(0, 1fr) 130px',
+}
+
+// ── Category filter widgets ───────────────────────────────────────────
+// Both share the same toggle semantics: each category is independently ON
+// (default) or OFF (in `disabled`); click flips. The inline chip strip is
+// used for compact pools; the dropdown takes over above
+// `INLINE_CHIP_THRESHOLD` so the header doesn't sprawl into a 6+ chip wall.
+
+function CategoryChip({
+  cat,
+  count,
+  enabled,
+  onToggle,
+}: {
+  cat: EventCategory
+  count: number
+  enabled: boolean
+  onToggle: (cat: EventCategory) => void
+}): React.JSX.Element {
+  const color = CATEGORY_COLOR[cat]
+  return (
+    <Flex
+      _hover={{ borderColor: color, opacity: 1 }}
+      align="center"
+      bg={enabled ? `${color}1f` : 'transparent'}
+      border="1px solid"
+      borderColor={enabled ? color : 'border.base'}
+      color={enabled ? 'font.primary' : 'font.secondary'}
+      cursor="pointer"
+      fontSize="xs"
+      gap="xs"
+      onClick={() => onToggle(cat)}
+      opacity={enabled ? 1 : 0.6}
+      px="ms"
+      py="2xs"
+      role="button"
+      rounded="full"
+      transition="all 0.15s"
+      userSelect="none"
+    >
+      <Box bg={color} borderRadius="full" h="6px" w="6px" />
+      <Text fontWeight="500">{CATEGORY_LABELS[cat]}</Text>
+      <Text fontFamily="mono" fontSize="2xs" opacity={0.7}>
+        ×{count}
+      </Text>
+    </Flex>
+  )
+}
+
+function CategoryFilterMenu({
+  present,
+  disabled,
+  countByCategory,
+  onToggle,
+  onReset,
+}: {
+  present: EventCategory[]
+  disabled: Set<EventCategory>
+  countByCategory: Map<EventCategory, number>
+  onToggle: (cat: EventCategory) => void
+  onReset: () => void
+}): React.JSX.Element {
+  const activeCount = present.length - disabled.size
+  const allActive = disabled.size === 0
+  return (
+    <HStack spacing="xs">
+      <Menu closeOnSelect={false}>
+        <MenuButton
+          as={Button}
+          rightIcon={<ChevronDownIcon />}
+          size="sm"
+          variant="tertiary"
+        >
+          {allActive
+            ? `All categories (${present.length})`
+            : `${activeCount} of ${present.length} categories`}
+        </MenuButton>
+        <MenuList minW="220px" zIndex="popover">
+          {present.map(cat => {
+            const enabled = !disabled.has(cat)
+            return (
+              <MenuItem key={cat} onClick={() => onToggle(cat)}>
+                <Flex align="center" gap="sm" w="full">
+                  <Checkbox isChecked={enabled} pointerEvents="none" />
+                  <Box bg={CATEGORY_COLOR[cat]} borderRadius="full" h="8px" w="8px" />
+                  <Text flex="1" fontSize="sm">
+                    {CATEGORY_LABELS[cat]}
+                  </Text>
+                  <Text color="font.secondary" fontFamily="mono" fontSize="xs">
+                    {countByCategory.get(cat) ?? 0}
+                  </Text>
+                </Flex>
+              </MenuItem>
+            )
+          })}
+        </MenuList>
+      </Menu>
+      {!allActive && (
+        <Button onClick={onReset} size="sm" variant="ghost">
+          Reset
+        </Button>
+      )}
+    </HStack>
+  )
 }
 
 function ArgList({ args }: { args: Record<string, string | number | boolean> }): React.JSX.Element {
@@ -79,25 +221,47 @@ function ArgList({ args }: { args: Record<string, string | number | boolean> }):
       </Text>
     )
   }
-  // Horizontal key/value on `md+`, stacked on `base` so long values
-  // (timestamps, formatted percentages) can't overflow a narrow viewport.
+  // On `md+` flow args inline on a single wrapping line — `key=value` pairs
+  // with a `·` separator. Single-arg events become one tight line; even amp
+  // ramps (4 args) stay one short line on a wide viewport. On `base` we
+  // keep the stacked key-above-value layout so long values don't overflow
+  // a phone screen.
   return (
     <Box>
-      {entries.map(([k, v]) => (
-        <Flex
-          align={{ base: 'flex-start', md: 'baseline' }}
-          direction={{ base: 'column', md: 'row' }}
-          gap={{ base: '2xs', md: 'sm' }}
-          key={k}
-        >
-          <Text color="font.secondary" fontSize="2xs" minW={{ base: 0, md: '80px' }}>
-            {k}
-          </Text>
-          <Text fontFamily="mono" fontSize="xs" wordBreak="break-word">
-            {formatEventArgValue(k, v)}
-          </Text>
-        </Flex>
-      ))}
+      <Flex
+        align={{ base: 'flex-start', md: 'baseline' }}
+        columnGap="sm"
+        direction={{ base: 'column', md: 'row' }}
+        flexWrap={{ base: 'nowrap', md: 'wrap' }}
+        rowGap="2xs"
+      >
+        {entries.map(([k, v], i) => (
+          <Flex
+            align={{ base: 'flex-start', md: 'baseline' }}
+            direction={{ base: 'column', md: 'row' }}
+            gap={{ base: '2xs', md: 'xs' }}
+            key={k}
+          >
+            <Text color="font.secondary" fontSize="2xs">
+              {k}
+            </Text>
+            <Text fontFamily="mono" fontSize="xs" wordBreak="break-word">
+              {formatEventArgValue(k, v)}
+              {i < entries.length - 1 && (
+                <Text
+                  as="span"
+                  color="font.secondary"
+                  display={{ base: 'none', md: 'inline' }}
+                  ml="sm"
+                  opacity={0.4}
+                >
+                  ·
+                </Text>
+              )}
+            </Text>
+          </Flex>
+        ))}
+      </Flex>
     </Box>
   )
 }
@@ -177,26 +341,43 @@ function EventRow({
       w="full"
     >
       <Grid
-        alignItems="flex-start"
+        alignItems="center"
         gap={{ base: 'sm', md: 'ms' }}
         gridTemplateColumns={GRID_COLS}
         px={{ base: 'md', md: 'lg' }}
-        py="ms"
+        py="xs"
         w="full"
       >
         <GridItem>
           <MobileLabel>When</MobileLabel>
-          <Text fontSize="xs">{dateFmt.format(new Date(event.blockTimestamp * 1000))}</Text>
+          {/* Mono so the fixed-width DD.MM.YYYY, HH:mm aligns down the
+              column; left-aligned on base where the row is stacked,
+              left-aligned on md+ since the column is already at the
+              start of the row. */}
+          <Text
+            fontFamily="mono"
+            fontSize="xs"
+            title={dateFullFmt.format(new Date(event.blockTimestamp * 1000))}
+            whiteSpace="nowrap"
+          >
+            {fmtWhen(event.blockTimestamp)}
+          </Text>
         </GridItem>
         <GridItem minW={0}>
           <MobileLabel>Event</MobileLabel>
-          <HStack mb="2xs" spacing="xs">
+          <HStack spacing="xs">
             <Box bg={style.color} borderRadius="full" flexShrink={0} h="8px" w="8px" />
-            <Text fontSize="xs" fontWeight="500">
+            <Text fontSize="xs" fontWeight="500" noOfLines={1}>
               {style.legendLabel}
             </Text>
           </HStack>
-          <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          <Text
+            color="font.secondary"
+            display={{ base: 'block', md: 'none' }}
+            fontFamily="mono"
+            fontSize="2xs"
+            noOfLines={1}
+          >
             {event.eventName}
           </Text>
         </GridItem>
@@ -245,14 +426,27 @@ export function PoolEventLog({
     return CATEGORY_ORDER.filter(c => set.has(c))
   }, [sorted])
 
-  // Empty Set = show all (so users don't accidentally hide everything by
-  // deselecting the last chip).
-  const [enabled, setEnabled] = useState<Set<EventCategory>>(new Set())
+  const countByCategory = useMemo(() => {
+    const m = new Map<EventCategory, number>()
+    for (const e of sorted) {
+      const cat = getEventStyle(e.eventName).category
+      m.set(cat, (m.get(cat) ?? 0) + 1)
+    }
+    return m
+  }, [sorted])
+
+  // Track *disabled* categories. Default empty = everything on. Click a
+  // chip / menu item flips that one category's state — symmetric, matches
+  // the user mental model ("each filter is independently ON or OFF").
+  const [disabled, setDisabled] = useState<Set<EventCategory>>(new Set())
   const [pageIndex, setPageIndex] = useState(0)
-  const [pageSize, setPageSize] = useState(25)
+  // 20 keeps the visible table around the same vertical footprint as the
+  // chart card above it on common viewports — most pools fit on one or two
+  // pages without forcing the user past the fold.
+  const [pageSize, setPageSize] = useState(20)
 
   const toggleCategory = useCallback((cat: EventCategory) => {
-    setEnabled(prev => {
+    setDisabled(prev => {
       const next = new Set(prev)
       if (next.has(cat)) next.delete(cat)
       else next.add(cat)
@@ -261,10 +455,15 @@ export function PoolEventLog({
     setPageIndex(0)
   }, [])
 
+  const resetCategories = useCallback(() => {
+    setDisabled(new Set())
+    setPageIndex(0)
+  }, [])
+
   const filtered = useMemo(() => {
-    if (enabled.size === 0) return sorted
-    return sorted.filter(e => enabled.has(getEventStyle(e.eventName).category))
-  }, [sorted, enabled])
+    if (disabled.size === 0) return sorted
+    return sorted.filter(e => !disabled.has(getEventStyle(e.eventName).category))
+  }, [sorted, disabled])
 
   const pageItems = useMemo(() => {
     const start = pageIndex * pageSize
@@ -299,34 +498,33 @@ export function PoolEventLog({
           </VStack>
         </Flex>
 
-        {presentCategories.length > 1 && (
-          <HStack flexWrap="wrap" spacing="xs">
-            {presentCategories.map(cat => {
-              const isActive = enabled.size === 0 || enabled.has(cat)
-              return (
-                <Flex
-                  align="center"
-                  bg="background.level1"
-                  border="1px solid"
-                  borderColor="border.base"
-                  cursor="pointer"
-                  fontSize="xs"
-                  gap="xs"
+        {presentCategories.length > 1 &&
+          (presentCategories.length <= INLINE_CHIP_THRESHOLD ? (
+            <HStack flexWrap="wrap" spacing="xs">
+              {presentCategories.map(cat => (
+                <CategoryChip
+                  cat={cat}
+                  count={countByCategory.get(cat) ?? 0}
+                  enabled={!disabled.has(cat)}
                   key={cat}
-                  onClick={() => toggleCategory(cat)}
-                  opacity={isActive ? 1 : 0.45}
-                  px="ms"
-                  py="2xs"
-                  rounded="full"
-                  transition="opacity 0.15s, background 0.15s"
-                  userSelect="none"
-                >
-                  <Text fontWeight="500">{CATEGORY_LABELS[cat]}</Text>
-                </Flex>
-              )
-            })}
-          </HStack>
-        )}
+                  onToggle={toggleCategory}
+                />
+              ))}
+              {disabled.size > 0 && (
+                <Button onClick={resetCategories} size="sm" variant="ghost">
+                  Reset
+                </Button>
+              )}
+            </HStack>
+          ) : (
+            <CategoryFilterMenu
+              countByCategory={countByCategory}
+              disabled={disabled}
+              onReset={resetCategories}
+              onToggle={toggleCategory}
+              present={presentCategories}
+            />
+          ))}
 
         <Card overflow="hidden" p={0} variant="subSection">
           <Box w="full">

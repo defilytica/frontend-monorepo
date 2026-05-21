@@ -1,9 +1,9 @@
 'use client'
 
-import { Box, Flex, HStack, Text } from '@chakra-ui/react'
+import { Box, Button, Flex, Text } from '@chakra-ui/react'
 import type { ECharts } from 'echarts/core'
 import ReactECharts from 'echarts-for-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PoolPageData } from '../page'
 import { CATEGORY_ORDER, EVENT_STYLES, getEventStyle, type EventCategory } from './eventStyles'
 import { formatEventArgValue } from './formatEventArgs'
@@ -24,6 +24,27 @@ const usdFull = (n: number) =>
   }).format(n || 0)
 
 const dateLabelFmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' })
+
+// Palette mirrors frontend-v3's pool-detail chart (PoolChartsProvider.tsx)
+// so the analytics pool page reads as part of the same product family. Bright
+// foreground colors against the dark subSection background — the earlier
+// gray-on-gray combination was barely readable.
+const CHART_COLORS = {
+  tvlLine: '#2554ff', // blue-600 (frontend-v3 TVL line)
+  tvlAreaFrom: 'rgba(14, 165, 233, 0.22)', // cyan-500 @ 22%
+  tvlAreaTo: 'rgba(68, 9, 236, 0.0)', // purple, fades to transparent
+  volumeFrom: 'rgba(0, 211, 149, 1)', // green @ 100%
+  volumeTo: 'rgba(0, 211, 149, 0.25)', // green @ 25%
+  fees: '#fb923c', // orange-400 (frontend-v3 fees bar)
+  axisLabel: 'rgba(255, 255, 255, 0.6)',
+  splitLine: 'rgba(255, 255, 255, 0.06)',
+  cursor: '#fbbf24', // amber-400 — distinct from blue TVL + orange fees
+  cursorLabelText: '#1a1a22',
+  tooltipBg: 'rgba(20, 20, 28, 0.96)',
+  tooltipBorder: 'rgba(255, 255, 255, 0.08)',
+  tooltipHead: '#E5D3BE', // tan accent (frontend-v3 tooltip heading)
+  tooltipBody: '#cbd5e1', // slate-300
+} as const
 
 type Snapshot = PoolPageData['snapshots'][number]
 type Ev = PoolPageData['events'][number]
@@ -90,6 +111,21 @@ export function PoolHistoryChart({
     return counts
   }, [events])
 
+  // Clicking a legend chip toggles event-name visibility on the chart.
+  // Disabled names get filtered out of `inRangeEvents` (markers + lines)
+  // and out of the amp markArea so users can quickly isolate a specific
+  // event family. Visible chip dim signals the disabled state.
+  const [disabled, setDisabled] = useState<Set<string>>(new Set())
+  const toggleEventName = useCallback((name: string) => {
+    setDisabled(prev => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }, [])
+  const resetEventNames = useCallback(() => setDisabled(new Set()), [])
+
   // Group event names by category for the legend's visual sectioning.
   const legendGroups = useMemo(() => {
     const byCategory = new Map<EventCategory, string[]>()
@@ -113,7 +149,10 @@ export function PoolHistoryChart({
     const seriesEnd = sorted[sorted.length - 1]?.timestamp ?? 0
 
     const inRangeEvents = events.filter(
-      e => e.blockTimestamp >= seriesStart && e.blockTimestamp <= seriesEnd
+      e =>
+        e.blockTimestamp >= seriesStart &&
+        e.blockTimestamp <= seriesEnd &&
+        !disabled.has(e.eventName)
     )
 
     // Pins, one per event. Even-indexed pins drop slightly so labels of
@@ -170,8 +209,9 @@ export function PoolHistoryChart({
 
     // Compare-mode cursors — solid, opaque, labelled. Drawn over the
     // dashed event lines so they're always identifiable, even when an
-    // event happens at the exact cursor instant.
-    const cursorColor = '#E6C6A0'
+    // event happens at the exact cursor instant. Amber chosen to stand
+    // apart from both the blue TVL line and the orange fees bars.
+    const cursorColor = CHART_COLORS.cursor
     if (cursors?.a != null) {
       markLines.push({
         xAxis: cursors.a * 1000,
@@ -180,7 +220,7 @@ export function PoolHistoryChart({
           show: true,
           formatter: 'A',
           position: 'insideEndTop',
-          color: '#1a1a22',
+          color: CHART_COLORS.cursorLabelText,
           fontWeight: 700,
           fontSize: 11,
           backgroundColor: cursorColor,
@@ -197,7 +237,7 @@ export function PoolHistoryChart({
           show: true,
           formatter: 'B',
           position: 'insideEndTop',
-          color: '#1a1a22',
+          color: CHART_COLORS.cursorLabelText,
           fontWeight: 700,
           fontSize: 11,
           backgroundColor: cursorColor,
@@ -212,6 +252,8 @@ export function PoolHistoryChart({
     const ampAreas: [{ xAxis: number; itemStyle: { color: string } }, { xAxis: number }][] = []
     for (const e of events) {
       if (e.eventName !== 'AmpUpdateStarted') continue
+      // Hide the ramp area when the user has toggled AmpUpdateStarted off.
+      if (disabled.has(e.eventName)) continue
       const startTime = Number(e.args.startTime ?? 0)
       const endTime = Number(e.args.endTime ?? 0)
       if (!startTime || !endTime || endTime <= startTime) continue
@@ -224,16 +266,21 @@ export function PoolHistoryChart({
     return {
       tooltip: {
         trigger: 'axis',
-        axisPointer: { type: 'cross' },
-        backgroundColor: 'rgba(20, 20, 28, 0.95)',
-        borderColor: 'rgba(255,255,255,0.1)',
-        textStyle: { color: '#fff', fontSize: 12 },
+        axisPointer: {
+          type: 'cross',
+          crossStyle: { color: CHART_COLORS.axisLabel, opacity: 0.4 },
+          lineStyle: { color: CHART_COLORS.axisLabel, opacity: 0.4 },
+        },
+        backgroundColor: CHART_COLORS.tooltipBg,
+        borderColor: CHART_COLORS.tooltipBorder,
+        textStyle: { color: CHART_COLORS.tooltipBody, fontSize: 12 },
+        padding: [10, 12, 10, 12],
         formatter: (rawParams: unknown) => {
           const params = rawParams as Array<{
             seriesName: string
             seriesType: string
             data: [number, number]
-            color: string
+            color: unknown
           }>
           if (!params?.length) return ''
           const ts = params[0].data[0]
@@ -242,25 +289,41 @@ export function PoolHistoryChart({
             day: 'numeric',
             year: 'numeric',
           })
+          // ECharts returns the original `itemStyle.color` for series in
+          // tooltip params — strings pass through, but gradient objects
+          // would render as "[object Object]" when interpolated. Map by
+          // series name to a solid base color for the tooltip swatch.
+          const TOOLTIP_SWATCH: Record<string, string> = {
+            TVL: CHART_COLORS.tvlLine,
+            'Volume 24h': CHART_COLORS.volumeFrom,
+            'Fees 24h': CHART_COLORS.fees,
+          }
+          const swatchFor = (p: { seriesName: string; color: unknown }): string =>
+            typeof p.color === 'string'
+              ? p.color
+              : TOOLTIP_SWATCH[p.seriesName] ?? CHART_COLORS.tvlLine
           const lines = params
             .filter(p => p.seriesType !== undefined)
             .map(
               p =>
-                `<div style="display:flex;justify-content:space-between;gap:12px;">
-                  <span><span style="display:inline-block;width:8px;height:8px;background:${p.color};border-radius:50%;margin-right:6px;"></span>${p.seriesName}</span>
-                  <span style="font-family:ui-monospace,monospace;">${usdFull(p.data[1])}</span>
+                `<div style="display:flex;justify-content:space-between;gap:14px;line-height:1.5;">
+                  <span style="color:${CHART_COLORS.tooltipBody};"><span style="display:inline-block;width:8px;height:8px;background:${swatchFor(p)};border-radius:50%;margin-right:6px;vertical-align:middle;"></span>${p.seriesName}</span>
+                  <span style="font-family:ui-monospace,monospace;color:#fff;font-weight:500;">${usdFull(p.data[1])}</span>
                 </div>`
             )
-          return `<div><div style="margin-bottom:6px;opacity:0.7;">${date}</div>${lines.join('')}</div>`
+          return `<div><div style="color:${CHART_COLORS.tooltipHead};font-weight:600;margin-bottom:6px;font-size:11px;letter-spacing:0.02em;text-transform:uppercase;">${date}</div>${lines.join('')}</div>`
         },
       },
       legend: {
         data: ['TVL', 'Volume 24h', 'Fees 24h'],
         bottom: 4,
-        textStyle: { fontSize: 11 },
+        textStyle: { fontSize: 11, color: CHART_COLORS.axisLabel },
+        icon: 'circle',
+        itemWidth: 10,
+        itemHeight: 10,
       },
       grid: {
-        top: 36,
+        top: 28,
         left: 56,
         right: 64,
         bottom: 48,
@@ -270,7 +333,10 @@ export function PoolHistoryChart({
         axisLabel: {
           formatter: (val: number) => dateLabelFmt.format(new Date(val)),
           fontSize: 10,
+          color: CHART_COLORS.axisLabel,
         },
+        axisLine: { lineStyle: { color: CHART_COLORS.splitLine } },
+        axisTick: { lineStyle: { color: CHART_COLORS.splitLine } },
         splitLine: { show: false },
       },
       yAxis: [
@@ -280,8 +346,11 @@ export function PoolHistoryChart({
           axisLabel: {
             formatter: (val: number) => usdCompact(val),
             fontSize: 10,
+            color: CHART_COLORS.axisLabel,
           },
-          splitLine: { lineStyle: { type: 'dashed', opacity: 0.2 } },
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: false },
         },
         {
           type: 'value',
@@ -289,7 +358,10 @@ export function PoolHistoryChart({
           axisLabel: {
             formatter: (val: number) => usdCompact(val),
             fontSize: 10,
+            color: CHART_COLORS.axisLabel,
           },
+          axisLine: { show: false },
+          axisTick: { show: false },
           splitLine: { show: false },
         },
       ],
@@ -301,7 +373,8 @@ export function PoolHistoryChart({
           data: tvlSeries,
           smooth: true,
           symbol: 'none',
-          lineStyle: { color: '#E6C6A0', width: 2 },
+          itemStyle: { color: CHART_COLORS.tvlLine },
+          lineStyle: { color: CHART_COLORS.tvlLine, width: 2 },
           areaStyle: {
             color: {
               type: 'linear',
@@ -310,8 +383,8 @@ export function PoolHistoryChart({
               x2: 0,
               y2: 1,
               colorStops: [
-                { offset: 0, color: 'rgba(230, 198, 160, 0.35)' },
-                { offset: 1, color: 'rgba(230, 198, 160, 0)' },
+                { offset: 0, color: CHART_COLORS.tvlAreaFrom },
+                { offset: 1, color: CHART_COLORS.tvlAreaTo },
               ],
             },
           },
@@ -368,7 +441,20 @@ export function PoolHistoryChart({
           type: 'bar',
           yAxisIndex: 1,
           data: volSeries,
-          itemStyle: { color: 'rgba(159, 149, 240, 0.55)' },
+          itemStyle: {
+            color: {
+              type: 'linear',
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: CHART_COLORS.volumeFrom },
+                { offset: 1, color: CHART_COLORS.volumeTo },
+              ],
+            },
+            borderRadius: [3, 3, 0, 0],
+          },
           barCategoryGap: '30%',
         },
         {
@@ -376,13 +462,13 @@ export function PoolHistoryChart({
           type: 'bar',
           yAxisIndex: 1,
           data: feeSeries,
-          itemStyle: { color: 'rgba(37, 226, 164, 0.7)' },
+          itemStyle: { color: CHART_COLORS.fees, borderRadius: [3, 3, 0, 0] },
           barCategoryGap: '30%',
           stack: 'overlay',
         },
       ],
     }
-  }, [snapshots, events, cursors])
+  }, [snapshots, events, cursors, disabled])
 
   // ── Compare-mode click handler ─────────────────────────────────────────
   // Bound via zrender (the low-level canvas layer beneath echarts) so we
@@ -431,37 +517,79 @@ export function PoolHistoryChart({
   const hasEvents = legendGroups.length > 0
 
   return (
-    <Box>
+    // Flex column so the chart Box below can claim the remaining vertical
+    // space via `flex="1" minH={0}`. Without this the parent's `height: 100%`
+    // doesn't propagate and ECharts' size-sensor falls back to ~100px,
+    // producing a totally flat canvas on wide viewports (see screenshot
+    // bug 2: `<canvas width="747" height="100">`).
+    <Box display="flex" flexDirection="column" h="full" w="full">
       {hasEvents && (
-        <HStack flexWrap="wrap" mb="md" spacing="xs">
+        // Interactive legend: click a chip to toggle that event name's
+        // pins, lines, and (for AmpUpdateStarted) the markArea. Disabled
+        // chips dim and the dot becomes a hollow ring so the off state
+        // reads unambiguously. A "Reset" link appears when anything is
+        // disabled so users can recover all visibility in one click.
+        <Flex
+          color="font.secondary"
+          columnGap="md"
+          flexWrap="wrap"
+          mb="md"
+          rowGap="2xs"
+        >
           {legendGroups.map(name => {
             const style = EVENT_STYLES[name] ?? getEventStyle(name)
             const count = eventCounts[name]
+            const isOff = disabled.has(name)
             return (
               <Flex
+                _hover={{ opacity: 1 }}
                 align="center"
-                bg="background.level1"
-                border="1px solid"
-                borderColor="border.base"
+                cursor="pointer"
                 fontSize="xs"
                 gap="xs"
                 key={name}
-                px="ms"
-                py="2xs"
-                rounded="full"
-                title={`${name} (${count})`}
+                onClick={() => toggleEventName(name)}
+                opacity={isOff ? 0.4 : 1}
+                role="button"
+                title={`${name} (${count}) — click to ${isOff ? 'show' : 'hide'}`}
+                transition="opacity 0.15s"
+                userSelect="none"
               >
-                <Box bg={style.color} borderRadius="full" h="8px" w="8px" />
-                <Text fontWeight="500">{style.legendLabel}</Text>
-                <Text color="font.secondary" fontFamily="mono">
-                  {count}
+                <Box
+                  bg={isOff ? 'transparent' : style.color}
+                  border={isOff ? '1.5px solid' : 'none'}
+                  borderColor={style.color}
+                  borderRadius="full"
+                  flexShrink={0}
+                  h="8px"
+                  w="8px"
+                />
+                <Text
+                  color="font.primary"
+                  fontWeight="500"
+                  textDecoration={isOff ? 'line-through' : 'none'}
+                >
+                  {style.legendLabel}
+                </Text>
+                <Text fontFamily="mono" fontSize="2xs" opacity={0.7}>
+                  ×{count}
                 </Text>
               </Flex>
             )
           })}
-        </HStack>
+          {disabled.size > 0 && (
+            <Button onClick={resetEventNames} size="xs" variant="ghost">
+              Reset
+            </Button>
+          )}
+        </Flex>
       )}
-      <Box h={{ base: '320px', md: '420px' }}>
+      {/* Fixed height on narrow viewports; on md+ this Box grows to fill
+          whatever vertical room is left in the bento right-column after
+          the legend. `minH={0}` is the magic incantation that lets a
+          flex child shrink below its content's intrinsic height — without
+          it ECharts' canvas would push the parent. */}
+      <Box flex={{ md: '1' }} h={{ base: '320px', md: 'auto' }} minH={{ md: 0 }}>
         <ReactECharts
           notMerge
           option={option}

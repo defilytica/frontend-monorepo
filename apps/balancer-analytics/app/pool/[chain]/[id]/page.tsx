@@ -65,9 +65,20 @@ export type PoolDetail = {
   symbol: string
   type: string
   protocolVersion: 1 | 2 | 3
+  /** Sub-version within the protocol (e.g. 1 = StablePool v1, 2 = v2). */
+  version: number | null
   chain: GqlChain
   createTime: number
-  tokens: { address: string; symbol: string; weight: string | null }[]
+  factory: string | null
+  swapFeeManager: string | null
+  pauseManager: string | null
+  poolCreator: string | null
+  tokens: {
+    address: string
+    symbol: string
+    weight: string | null
+    logoURI: string | null
+  }[]
 }
 
 export type PoolSnapshot = {
@@ -79,14 +90,18 @@ export type PoolSnapshot = {
   sharePrice: number
 }
 
+export type PoolHistoryRange = '30d' | '90d' | '180d' | '1y' | 'all'
+
 export type PoolPageData = {
   poolDetail: PoolDetail
   snapshots: PoolSnapshot[]
   events: PoolParamEvent[]
   lastBlock: number
-  /** True when the page was rendered with `?fullHistory` — both the event
-   *  scan and the snapshot series span the pool's full lifetime rather than
-   *  the default 90-day window. Drives the range label + toggle. */
+  /** Active range selector value — drives the chart header label, the
+   *  range toggle, and whether the event scan ran in full-history mode. */
+  range: PoolHistoryRange
+  /** Derived: any range > 90d ran the full-history event scan. Kept on the
+   *  payload for components that just want a binary "did we deep-scan?". */
   fullHistory: boolean
   state: {
     universal: UniversalV3State | null
@@ -113,12 +128,18 @@ const POOL_DETAIL_QUERY = /* GraphQL */ `
       symbol
       type
       protocolVersion
+      version
       chain
       createTime
+      factory
+      swapFeeManager
+      pauseManager
+      poolCreator
       poolTokens {
         address
         symbol
         weight
+        logoURI
       }
     }
   }
@@ -207,11 +228,40 @@ export default async function Page({
   // 30s TTL and re-scan from the cold floor. Useful for inspecting a pool
   // whose first sync hit a transient drpc error and left the table empty.
   const forceRefresh = search.refresh !== undefined
-  // `?fullHistory` widens both the event scan (→ deployment block) and the
-  // api-v3 snapshot series (→ ALL_TIME) so the chart spans the pool's whole
-  // lifetime. Server-driven, mirroring the `?refresh` pattern — the toggle
-  // is just a link to this URL.
-  const fullHistory = search.fullHistory !== undefined
+
+  // `?range=30d|90d|180d|1y|all` (default 90d). Drives both the api-v3
+  // snapshot enum AND the event-scan window — see `RANGE_*` constants
+  // below. `?fullHistory` (legacy URL form) maps to `?range=all` for
+  // backwards compat so old links keep working.
+  type HistoryRange = '30d' | '90d' | '180d' | '1y' | 'all'
+  const VALID_RANGES: ReadonlySet<HistoryRange> = new Set(['30d', '90d', '180d', '1y', 'all'])
+  function parseRange(raw: unknown): HistoryRange {
+    if (typeof raw === 'string' && VALID_RANGES.has(raw as HistoryRange)) {
+      return raw as HistoryRange
+    }
+    return '90d'
+  }
+  const rawRange = Array.isArray(search.range) ? search.range[0] : search.range
+  const range: HistoryRange =
+    search.fullHistory !== undefined && search.range === undefined
+      ? 'all'
+      : parseRange(rawRange)
+
+  // Snapshot enum per range. 30d uses the 90-day fetch and trims client-side
+  // (api-v3 has no 30-day enum). The longer ranges round-trip directly.
+  const SNAPSHOT_RANGE: Record<HistoryRange, string> = {
+    '30d': 'NINETY_DAYS',
+    '90d': 'NINETY_DAYS',
+    '180d': 'ONE_HUNDRED_EIGHTY_DAYS',
+    '1y': 'ONE_YEAR',
+    all: 'ALL_TIME',
+  }
+  // Any range > 90d triggers the one-time full-history event scan so the
+  // chart's event markers can land anywhere on the visible x-axis. After
+  // the first deep scan, `pool_sync_state.deep_synced` latches and all
+  // future visits (any range) serve fast from the DB. Backwards-compat:
+  // legacy `fullHistory` was treated as `all` above.
+  const fullHistory = range !== '30d' && range !== '90d'
 
   let chain: GqlChain
   try {
@@ -267,9 +317,19 @@ export default async function Page({
       symbol: string
       type: string
       protocolVersion: number
+      version: number | null
       chain: GqlChain
       createTime: number
-      poolTokens: { address: string; symbol: string; weight: string | null }[]
+      factory: string | null
+      swapFeeManager: string | null
+      pauseManager: string | null
+      poolCreator: string | null
+      poolTokens: {
+        address: string
+        symbol: string
+        weight: string | null
+        logoURI: string | null
+      }[]
     }
   }>(POOL_DETAIL_QUERY, { id: apiV3Id, chain }, 'poolGetPool', { forceFresh: forceRefresh })
 
@@ -278,7 +338,7 @@ export default async function Page({
   const [snapshotsRes, syncRes] = await Promise.all([
     gqlFetch<{ snapshots: PoolSnapshot[] }>(
       SNAPSHOTS_QUERY,
-      { id: apiV3Id, chain, range: fullHistory ? 'ALL_TIME' : 'NINETY_DAYS' },
+      { id: apiV3Id, chain, range: SNAPSHOT_RANGE[range] },
       'poolGetSnapshots',
       { forceFresh: forceRefresh }
     ),
@@ -310,6 +370,7 @@ export default async function Page({
       address: t.address,
       symbol: t.symbol,
       weight: t.weight,
+      logoURI: t.logoURI,
     })),
   }
 
@@ -385,11 +446,26 @@ export default async function Page({
     stable = s
   }
 
+  // For the 30d range we fetched the 90-day snapshot enum (api-v3 has no
+  // 30d enum) and trim to the latest-30-days window. We anchor the cutoff
+  // on the *latest snapshot timestamp* rather than `Date.now()` — pure
+  // function of the input, no clock dependency in the render path, and
+  // naturally robust to stale series where "now" is past the last point.
+  const rawSnapshots = snapshotsRes?.snapshots ?? []
+  let trimmedSnapshots = rawSnapshots
+  if (range === '30d' && rawSnapshots.length > 0) {
+    let latest = 0
+    for (const s of rawSnapshots) if (s.timestamp > latest) latest = s.timestamp
+    const cutoff = latest - 30 * 86400
+    trimmedSnapshots = rawSnapshots.filter(s => s.timestamp >= cutoff)
+  }
+
   const data: PoolPageData = {
     poolDetail,
-    snapshots: snapshotsRes?.snapshots ?? [],
+    snapshots: trimmedSnapshots,
     events: syncRes.events,
     lastBlock: syncRes.lastBlock,
+    range,
     fullHistory,
     state: {
       universal,

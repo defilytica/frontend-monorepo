@@ -481,7 +481,7 @@ function TableRow({ pool, index }: { pool: EnrichedPool; index: number }) {
 
           <GridItem minW={0}>
             <Box display={{ base: 'block', lg: 'flex', '2xl': 'block' }} flexDirection="column" gap="xxs">
-              <PoolTokenPillsLite pool={pool} />
+              <PoolTokenPillsLite tokens={pool.poolTokens ?? []} type={pool.type} />
               {/* On lg only, fold the details under the pool tokens. */}
               <Box display={{ base: 'none', lg: 'block', '2xl': 'none' }}>
                 <PoolDetailsCellLite pool={pool} />
