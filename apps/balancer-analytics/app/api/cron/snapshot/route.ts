@@ -22,7 +22,7 @@ import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import networkConfigs from '@repo/lib/config/networks'
 import { PROJECT_CONFIG } from '@repo/lib/config/getProjectConfig'
 import {
-  ensureSchema,
+  ensureSchemaOnce,
   sql,
   AGGREGATE_KEY,
   PROTOCOL_CORE,
@@ -202,6 +202,13 @@ function aggregateCowAmm(pools: RawCowAmmPool[], ts: number): SnapshotRow[] {
 
 async function upsertRows(rows: SnapshotRow[]): Promise<void> {
   if (rows.length === 0) return
+  // Single HTTP roundtrip — `sql.transaction([...])` packs every statement
+  // into one neon-serverless fetch. ~12 rows per tick (6 chains × 2 protocol
+  // breakdowns + 2 aggregates) → 1 round trip, no lingering connection,
+  // function returns and the DB is free to scale to zero. Structured log
+  // mirrors `[db]` entries so the post-deploy verification trace shows one
+  // write per cron tick and nothing else.
+  const start = Date.now()
   await sql.transaction(
     rows.map(
       r => sql`
@@ -226,6 +233,12 @@ async function upsertRows(rows: SnapshotRow[]): Promise<void> {
       `
     )
   )
+  console.info('[db]', {
+    op: 'write',
+    helper: `cron/snapshot/upsertRows[n=${rows.length}]`,
+    ms: Date.now() - start,
+    ok: true,
+  })
 }
 
 function unauthorized() {
@@ -236,7 +249,7 @@ export async function GET(req: Request) {
   const auth = req.headers.get('authorization')
   if (auth !== `Bearer ${process.env.CRON_SECRET}`) return unauthorized()
 
-  await ensureSchema()
+  await ensureSchemaOnce()
 
   const ts = Math.floor(Date.now() / 1000 / HOUR_S) * HOUR_S
   const rows: SnapshotRow[] = []

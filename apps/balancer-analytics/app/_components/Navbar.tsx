@@ -8,11 +8,15 @@ import { useEffect, useState } from 'react'
 
 const NAVBAR_HEIGHT = '72px'
 
+// Hrefs are root-relative (`/#section`) rather than bare anchors so they
+// also work from non-home routes like `/pool/[chain]/[id]`. Bare `#anchor`
+// only resolves against the current page's DOM, which on the pool detail
+// page has none of these section ids.
 const NAV_LINKS: { label: string; href: string; section: string }[] = [
-  { label: 'Overview', href: '#overview', section: 'overview' },
-  { label: 'Liquidity', href: '#liquidity', section: 'liquidity' },
-  { label: 'Pools', href: '#pools', section: 'pools' },
-  { label: 'Governance', href: '#governance', section: 'governance' },
+  { label: 'Overview', href: '/#overview', section: 'overview' },
+  { label: 'Liquidity', href: '/#liquidity', section: 'liquidity' },
+  { label: 'Pools', href: '/#pools', section: 'pools' },
+  { label: 'Governance', href: '/#governance', section: 'governance' },
 ]
 
 export function Navbar() {
@@ -26,6 +30,16 @@ export function Navbar() {
   useEffect(() => {
     const handleScroll = () => {
       setScrolled(window.scrollY > 8)
+
+      // Only run active-section detection on pages that actually expose
+      // the section anchors. The pool detail route has none of them, so
+      // bail out and clear the highlight rather than pretending we're on
+      // "Overview".
+      const hasAnySection = NAV_LINKS.some(link => document.getElementById(link.section))
+      if (!hasAnySection) {
+        setActiveSection('')
+        return
+      }
 
       const offset = 96
       let current = NAV_LINKS[0].section

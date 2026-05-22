@@ -109,10 +109,19 @@ const getGovernancePayload = unstable_cache(
 
 export async function GET() {
   try {
-    return Response.json(await getGovernancePayload())
+    // Browser/CDN cache aligned with the server-side `revalidate: 600` —
+    // governance proposals tick slowly; 10-min freshness is generous.
+    return Response.json(await getGovernancePayload(), {
+      headers: {
+        'Cache-Control': 'public, max-age=600, stale-while-revalidate=1800',
+      },
+    })
   } catch (err) {
     const now = Math.floor(Date.now() / 1000)
     const empty: GovernancePayload = { items: [], generatedAt: now, space: SPACE }
-    return Response.json({ ...empty, error: String(err) }, { status: 502 })
+    return Response.json(
+      { ...empty, error: String(err) },
+      { status: 502, headers: { 'Cache-Control': 'no-store' } }
+    )
   }
 }

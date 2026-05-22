@@ -5,9 +5,8 @@ import Image from 'next/image'
 import { useState } from 'react'
 import { GqlPoolType } from '@repo/lib/shared/services/api/generated/graphql'
 import { isStableLike } from '@repo/lib/modules/pool/pool.helpers'
-import type { EnrichedPool } from '@analytics/lib/hooks/usePoolExplorer'
 
-type PillToken = {
+export type PillToken = {
   address: string
   symbol?: string | null
   logoURI?: string | null
@@ -19,15 +18,18 @@ const ICON = 22
 // Mirrors `PoolListTokenPills` in `@repo/lib` (badge shell, weight text, icon
 // stack overlap) but renders token icons via a local <Image> fallback so we
 // don't need TokensProvider in the analytics app.
-export function PoolTokenPillsLite({ pool }: { pool: EnrichedPool }) {
-  const tokens: PillToken[] = (pool.poolTokens ?? []).map(t => ({
-    address: t.address,
-    symbol: t.symbol,
-    logoURI: t.logoURI,
-    weight: t.weight,
-  }))
-
-  if (isStableLike(pool.type as GqlPoolType)) {
+//
+// Accepts `tokens` + `type` directly so both the explorer's `EnrichedPool`
+// row and the pool detail page's `PoolDetail` shape can pass through
+// without adapters.
+export function PoolTokenPillsLite({
+  tokens,
+  type,
+}: {
+  tokens: PillToken[]
+  type: string
+}) {
+  if (isStableLike(type as GqlPoolType)) {
     return <StablePills tokens={tokens} />
   }
   return <WeightedPills tokens={tokens} />

@@ -29,6 +29,26 @@ if (!dbUrl) {
 
 export const sql = neon(dbUrl)
 
+// ── Per-op structured logging ──────────────────────────────────────────────
+// Each Neon HTTP roundtrip emits one log line of `{ op, helper, ms }`. Post-
+// deploy the only lines should be `op: 'write'` at cron cadence (~1/hr) and
+// the pool-page read pair (`getPoolSyncState`, `getPoolParamEvents`) capped
+// at one per (chain, pool) per `SYNC_TTL_SECONDS`. Anything else on a
+// sub-minute timer is a regression and worth chasing.
+type DbOp = 'read' | 'write' | 'ddl'
+
+async function trackDbOp<T>(op: DbOp, helper: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now()
+  try {
+    const result = await fn()
+    console.info('[db]', { op, helper, ms: Date.now() - start, ok: true })
+    return result
+  } catch (err) {
+    console.warn('[db]', { op, helper, ms: Date.now() - start, ok: false, err: String(err) })
+    throw err
+  }
+}
+
 export const AGGREGATE_KEY = 'ALL' as const
 
 export const PROTOCOL_CORE = 'CORE' as const
@@ -65,6 +85,26 @@ export type SnapshotRow = {
   poolCount: number
   numLps: number
   source: SnapshotSource
+}
+
+// `ensureSchema` runs ~13 idempotent DDL statements. That's a *huge* share
+// of the per-request DB roundtrip count on routes that called it on every
+// hit (the events route used to). `ensureSchemaOnce` memoizes the result
+// per warm function instance so cold-start pays the DDL cost once, and
+// every subsequent request inside that instance pays zero. The schema is
+// idempotent, so re-running on the next cold start is also safe — we just
+// don't want to pay 13 round trips per request when the table already exists.
+let schemaPromise: Promise<void> | null = null
+export function ensureSchemaOnce(): Promise<void> {
+  if (!schemaPromise) {
+    schemaPromise = ensureSchema().catch(err => {
+      // Reset on failure so the next call retries — better than wedging the
+      // route in a permanently-broken state on a transient DB hiccup.
+      schemaPromise = null
+      throw err
+    })
+  }
+  return schemaPromise
 }
 
 export async function ensureSchema(): Promise<void> {
@@ -106,4 +146,218 @@ export async function ensureSchema(): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_protocol_snapshots_ts ON protocol_snapshots (ts DESC)`
   await sql`CREATE INDEX IF NOT EXISTS idx_protocol_snapshots_chain_ts ON protocol_snapshots (chain, ts DESC)`
   await sql`CREATE INDEX IF NOT EXISTS idx_protocol_snapshots_protocol_ts ON protocol_snapshots (protocol, ts DESC)`
+
+  // ── Pool parameter event timeline (lazy-fetched on pool-page visit) ──
+  // One row per decoded param-change event for a single pool. UNIQUE
+  // constraint on (chain, pool_address, block_number, log_index) makes
+  // INSERTs idempotent — the tail-sync can safely re-process an overlapping
+  // range without producing duplicates.
+  await sql`
+    CREATE TABLE IF NOT EXISTS pool_param_events (
+      id               BIGSERIAL    PRIMARY KEY,
+      chain            TEXT         NOT NULL,
+      pool_address     TEXT         NOT NULL,
+      protocol_version SMALLINT     NOT NULL,
+      block_number     BIGINT       NOT NULL,
+      block_timestamp  BIGINT       NOT NULL,
+      log_index        INT          NOT NULL,
+      tx_hash          TEXT         NOT NULL,
+      event_name       TEXT         NOT NULL,
+      args             JSONB        NOT NULL,
+      captured_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+      UNIQUE (chain, pool_address, block_number, log_index)
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_pool_param_events_pool ON pool_param_events (chain, pool_address, block_number)`
+  await sql`CREATE INDEX IF NOT EXISTS idx_pool_param_events_pool_event ON pool_param_events (chain, pool_address, event_name)`
+
+  // ── Per-pool sync watermark ──
+  // Tracks last successfully-synced block and the wall-clock time of the last
+  // sync attempt. Used to (a) compute the next `fromBlock` for tail-sync and
+  // (b) skip the RPC roundtrip when `last_synced_at` is within the TTL.
+  await sql`
+    CREATE TABLE IF NOT EXISTS pool_sync_state (
+      chain          TEXT         NOT NULL,
+      pool_address   TEXT         NOT NULL,
+      last_block     BIGINT       NOT NULL,
+      last_synced_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+      PRIMARY KEY (chain, pool_address)
+    )
+  `
+  // `deep_synced` records that a one-time full-history scan (from the
+  // pool's deployment block, not the 90-day cap) has completed for this
+  // pool. Once true, a `?fullHistory` visit is served from the DB on the
+  // normal warm path instead of re-walking the whole chain every time.
+  // Idempotent ALTER so existing deploys migrate in place.
+  await sql`ALTER TABLE pool_sync_state ADD COLUMN IF NOT EXISTS deep_synced BOOLEAN NOT NULL DEFAULT false`
+}
+
+// ── pool_param_events helpers ──────────────────────────────────────────────
+
+export type PoolParamEventRow = {
+  chain: string
+  poolAddress: string
+  protocolVersion: number
+  blockNumber: number
+  blockTimestamp: number
+  logIndex: number
+  txHash: string
+  eventName: string
+  args: Record<string, unknown>
+}
+
+export async function getPoolParamEvents(
+  chain: string,
+  poolAddress: string
+): Promise<PoolParamEventRow[]> {
+  const rows = await trackDbOp(
+    'read',
+    'getPoolParamEvents',
+    () => sql`
+      SELECT
+        chain,
+        pool_address,
+        protocol_version,
+        block_number,
+        block_timestamp,
+        log_index,
+        tx_hash,
+        event_name,
+        args
+      FROM pool_param_events
+      WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+      ORDER BY block_number ASC, log_index ASC
+    `
+  )
+  return (rows as Record<string, unknown>[]).map(r => ({
+    chain: r.chain as string,
+    poolAddress: r.pool_address as string,
+    protocolVersion: Number(r.protocol_version),
+    blockNumber: Number(r.block_number),
+    blockTimestamp: Number(r.block_timestamp),
+    logIndex: Number(r.log_index),
+    txHash: r.tx_hash as string,
+    eventName: r.event_name as string,
+    args: (r.args ?? {}) as Record<string, unknown>,
+  }))
+}
+
+/**
+ * Cheap existence check for a pool's persisted timeline. Used by the sync
+ * to detect the "poisoned watermark" state — a `pool_sync_state` row whose
+ * `last_block` advanced past real events while zero rows were ever captured
+ * (e.g. a sync that ran before a pool type's Filter B was wired). Such a
+ * pool can never self-heal on the warm `watermark + 1` path, so the sync
+ * falls back to a cold-range rescan when this returns 0.
+ */
+export async function countPoolParamEvents(
+  chain: string,
+  poolAddress: string
+): Promise<number> {
+  const rows = await trackDbOp(
+    'read',
+    'countPoolParamEvents',
+    () => sql`
+      SELECT count(*)::int AS n
+      FROM pool_param_events
+      WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+    `
+  )
+  return Number((rows as Record<string, unknown>[])[0]?.n ?? 0)
+}
+
+export async function insertPoolParamEvents(
+  rows: readonly PoolParamEventRow[]
+): Promise<void> {
+  if (rows.length === 0) return
+  // neon-serverless `sql` helper doesn't support multi-row VALUES tuples
+  // through tagged-template params, so we batch via `sql.transaction([...])`
+  // with one parameterized statement per row. INSERT ... ON CONFLICT keeps
+  // re-runs idempotent against the (chain, pool, block, log_index) UNIQUE.
+  const statements = rows.map(
+    r => sql`
+      INSERT INTO pool_param_events (
+        chain, pool_address, protocol_version,
+        block_number, block_timestamp, log_index,
+        tx_hash, event_name, args
+      ) VALUES (
+        ${r.chain},
+        ${r.poolAddress.toLowerCase()},
+        ${r.protocolVersion},
+        ${r.blockNumber},
+        ${r.blockTimestamp},
+        ${r.logIndex},
+        ${r.txHash.toLowerCase()},
+        ${r.eventName},
+        ${JSON.stringify(r.args)}::jsonb
+      )
+      ON CONFLICT (chain, pool_address, block_number, log_index) DO NOTHING
+    `
+  )
+  await trackDbOp('write', `insertPoolParamEvents[n=${rows.length}]`, () =>
+    sql.transaction(statements)
+  )
+}
+
+// ── pool_sync_state helpers ────────────────────────────────────────────────
+
+export type PoolSyncState = {
+  chain: string
+  poolAddress: string
+  lastBlock: number
+  lastSyncedAt: Date
+  /** A full-history scan (from the deployment block) has completed for this
+   *  pool. `?fullHistory` then serves from the DB instead of re-scanning. */
+  deepSynced: boolean
+}
+
+export async function getPoolSyncState(
+  chain: string,
+  poolAddress: string
+): Promise<PoolSyncState | null> {
+  const rows = await trackDbOp(
+    'read',
+    'getPoolSyncState',
+    () => sql`
+      SELECT chain, pool_address, last_block, last_synced_at, deep_synced
+      FROM pool_sync_state
+      WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+      LIMIT 1
+    `
+  )
+  const r = (rows as Record<string, unknown>[])[0]
+  if (!r) return null
+  return {
+    chain: r.chain as string,
+    poolAddress: r.pool_address as string,
+    lastBlock: Number(r.last_block),
+    lastSyncedAt: new Date(r.last_synced_at as string),
+    deepSynced: r.deep_synced === true,
+  }
+}
+
+/**
+ * Upsert the per-pool watermark. `markDeepSynced` is monotonic — passing
+ * `true` latches `deep_synced` on (a completed full-history scan), passing
+ * `false` (the default, for normal tail-syncs) preserves whatever it was.
+ * It never flips back to false.
+ */
+export async function upsertPoolSyncState(
+  chain: string,
+  poolAddress: string,
+  lastBlock: number,
+  markDeepSynced = false
+): Promise<void> {
+  await trackDbOp(
+    'write',
+    'upsertPoolSyncState',
+    () => sql`
+      INSERT INTO pool_sync_state (chain, pool_address, last_block, last_synced_at, deep_synced)
+      VALUES (${chain}, ${poolAddress.toLowerCase()}, ${lastBlock}, now(), ${markDeepSynced})
+      ON CONFLICT (chain, pool_address) DO UPDATE
+        SET last_block = EXCLUDED.last_block,
+            last_synced_at = now(),
+            deep_synced = pool_sync_state.deep_synced OR EXCLUDED.deep_synced
+    `
+  )
 }

@@ -39,7 +39,7 @@
 
 import 'server-only'
 import {
-  ensureSchema,
+  ensureSchemaOnce,
   sql,
   AGGREGATE_KEY,
   PROTOCOL_V2,
@@ -94,7 +94,7 @@ export async function POST(req: Request) {
   }
   const force = !!body.force
 
-  await ensureSchema()
+  await ensureSchemaOnce()
 
   const accepted: { ts: number; protocol: Protocol; tvl: number }[] = []
   const rejected: { row: InputRow; reason: string }[] = []

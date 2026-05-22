@@ -3,6 +3,7 @@
   "ui": "tui",
   "globalEnv": [
     "NEXT_PUBLIC_BALANCER_API_URL",
+    "REFRESH_SCHEMA",
     "NEXT_PUBLIC_APP_ENV",
     "NEXT_PUBLIC_PROJECT_ID",
     "NEXT_PRIVATE_DRPC_KEY",

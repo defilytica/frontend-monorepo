@@ -11,7 +11,7 @@ type FooterLink = { label: string; href: string; icon?: 'github' }
 const RESOURCES: FooterLink[] = [
   { label: 'Balancer App', href: 'https://balancer.fi' },
   { label: 'GitHub Repo', href: 'https://github.com/defilytica/frontend-monorepo', icon: 'github' },
-  { label: 'DeFiLytica', href: 'https://defilytica.com' },
+  { label: 'DeFilytica', href: 'https://defilytica.com' },
 ]
 
 export function Footer() {
@@ -28,7 +28,7 @@ export function Footer() {
             <VStack align="flex-start" maxW="420px" spacing="sm">
               <HStack spacing="sm">
                 <Image
-                  alt="DeFiLytica"
+                  alt="DeFilytica"
                   height={28}
                   src="/images/defilytica.png"
                   width={28}
@@ -39,7 +39,7 @@ export function Footer() {
               </HStack>
               <Text color="font.secondary" fontSize="sm" sx={{ textWrap: 'balance' }}>
                 Aggregated metrics across Balancer v2 and v3, served live from the Balancer API.
-                Built and maintained by DeFiLytica.
+                Built and maintained by DeFilytica.
               </Text>
             </VStack>
 
@@ -91,7 +91,7 @@ export function Footer() {
             spacing="sm"
           >
             <Text color="font.secondary" fontSize="xs">
-              © {new Date().getFullYear()} DeFiLytica · Not affiliated with Balancer DAO.
+              © {new Date().getFullYear()} DeFilytica · Not affiliated with Balancer DAO.
             </Text>
             <Text color="font.secondary" fontSize="xs">
               Data sourced from the Balancer API and Snapshot.
