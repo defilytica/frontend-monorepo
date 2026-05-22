@@ -10,10 +10,17 @@
 
 'use client'
 
+import { useEffect } from 'react'
 import { Box, Spinner, Text, VStack } from '@chakra-ui/react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
 
 export default function Loading(): React.JSX.Element {
+  // Land the throbber at the top during a cold scan rather than wherever
+  // the previous page was scrolled (see PoolPageView for the full reset).
+  useEffect(() => {
+    window.scrollTo({ top: 0 })
+  }, [])
+
   return (
     <DefaultPageContainer pb="2xl" pt={['md', 'lg']}>
       <Box

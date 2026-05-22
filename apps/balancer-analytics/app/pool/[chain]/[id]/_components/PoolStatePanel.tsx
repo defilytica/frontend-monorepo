@@ -15,7 +15,7 @@ import {
   VStack,
 } from '@chakra-ui/react'
 import Link from 'next/link'
-import { ExternalLink } from 'react-feather'
+import { ArrowUpRight } from 'react-feather'
 import type {
   GyroEclpTypeState,
   LbpTypeState,
@@ -88,14 +88,14 @@ function AddressLink({
       <Flex
         _hover={{ color: 'font.linkHover' }}
         align="center"
-        color="font.primary"
+        color="font.link"
         fontFamily="mono"
         fontSize="sm"
         gap="2xs"
         transition="color 0.15s"
       >
         {label}
-        <ExternalLink size={11} />
+        <ArrowUpRight size={12} />
       </Flex>
     </Link>
   )
@@ -150,7 +150,9 @@ function formatDuration(seconds: number): string {
 type Token = { symbol: string }
 
 /** Token-labelled weight rows. Falls back to positional labels when the
- *  weight array length doesn't line up with the api-v3 token list. */
+ *  weight array length doesn't line up with the api-v3 token list.
+ *  Rendered as `StateRow`s so weights align on the same value tab as every
+ *  other key/value row in the panel. */
 function WeightRows({
   weights,
   tokens,
@@ -159,16 +161,13 @@ function WeightRows({
   tokens: Token[]
 }): React.JSX.Element {
   return (
-    <VStack align="stretch" spacing="2xs">
+    <VStack align="stretch" spacing="sm" w="full">
       {weights.map((w, i) => (
-        <Flex justify="space-between" key={i}>
-          <Text fontSize="xs" variant="secondary">
-            {tokens[i]?.symbol ?? `token ${i}`}
-          </Text>
-          <Text fontFamily="mono" fontSize="xs">
-            {formatWeightPct(w)}
-          </Text>
-        </Flex>
+        <StateRow
+          key={i}
+          label={tokens[i]?.symbol ?? `token ${i}`}
+          value={formatWeightPct(w)}
+        />
       ))}
     </VStack>
   )
@@ -200,12 +199,7 @@ function TypeSection({
     <Card h="full" overflow="hidden" p={{ base: 'md', md: 'md' }} variant="subSection">
       <VStack align="stretch" h="full" spacing="sm" w="full">
         <Flex align="center" justify="space-between">
-          <Heading
-            fontSize="sm"
-            fontWeight={600}
-            letterSpacing="0.04em"
-            textTransform="uppercase"
-          >
+          <Heading fontSize="md" variant="h4">
             {title}
           </Heading>
           {badge}
@@ -235,19 +229,22 @@ type ManageLink = { label: string; hint: string; href: string }
  *  outline Button (label left, external-link icon right). */
 function ManageButton({ link }: { link: ManageLink }): React.JSX.Element {
   return (
+    // `alignSelf='flex-start'` keeps the button content-width — the parent
+    // section Stack is `align='stretch'`, which would otherwise force it to
+    // span the whole card. `tertiary` is the monorepo's neutral action
+    // variant (background.level3 + shadow); reads as a real button against
+    // the subSection card.
     <Button
+      alignSelf="flex-start"
       as="a"
-      fontSize="sm"
       fontWeight={500}
       href={link.href}
-      justifyContent="space-between"
       rel="noreferrer"
-      rightIcon={<ExternalLink size={12} />}
-      size="md"
+      rightIcon={<ArrowUpRight size={14} />}
+      size="sm"
       target="_blank"
       title={link.hint}
-      variant="outline"
-      w="full"
+      variant="tertiary"
     >
       {link.label}
     </Button>
@@ -369,29 +366,18 @@ function ReclammSection({
         value={formatWeightPct(rc.dailyPriceShiftExponent)}
       />
       {updateActive && (
-        <Box borderColor="border.base" borderLeft="2px solid" pl="md">
-          <Text fontSize="xs" mb="xs" variant="secondary">
-            Price-ratio update
-          </Text>
-          <VStack align="stretch" spacing="2xs">
-            <Flex justify="space-between">
-              <Text fontSize="xs" variant="secondary">
-                start
-              </Text>
-              <Text fontFamily="mono" fontSize="xs">
-                {formatScaled(rc.priceRatio.start)} · {formatTimestamp(rc.priceRatio.startTime)}
-              </Text>
-            </Flex>
-            <Flex justify="space-between">
-              <Text fontSize="xs" variant="secondary">
-                end
-              </Text>
-              <Text fontFamily="mono" fontSize="xs">
-                {formatScaled(rc.priceRatio.end)} · {formatTimestamp(rc.priceRatio.endTime)}
-              </Text>
-            </Flex>
-          </VStack>
-        </Box>
+        <>
+          <StateRow
+            hint="price-ratio update start"
+            label="Update from"
+            value={`${formatScaled(rc.priceRatio.start)} · ${formatTimestamp(rc.priceRatio.startTime)}`}
+          />
+          <StateRow
+            hint="price-ratio update target"
+            label="Update to"
+            value={`${formatScaled(rc.priceRatio.end)} · ${formatTimestamp(rc.priceRatio.endTime)}`}
+          />
+        </>
       )}
       {manageButton}
     </TypeSection>
@@ -422,21 +408,18 @@ function LbpSection({
         <WeightRows tokens={tokens} weights={lbp.normalizedWeights} />
       </Box>
       {hasSchedule && (
-        <Box borderColor="border.base" borderLeft="2px solid" pl="md">
-          <Text fontSize="xs" mb="xs" variant="secondary">
+        <Box>
+          <Text fontSize="xs" mb="sm" variant="secondary">
             Gradual update · {formatTimestamp(lbp.update.startTime)} →{' '}
             {formatTimestamp(lbp.update.endTime)}
           </Text>
-          <VStack align="stretch" spacing="2xs">
+          <VStack align="stretch" spacing="sm" w="full">
             {lbp.update.startWeights.map((sw, i) => (
-              <Flex justify="space-between" key={i}>
-                <Text fontSize="xs" variant="secondary">
-                  {tokens[i]?.symbol ?? `token ${i}`}
-                </Text>
-                <Text fontFamily="mono" fontSize="xs">
-                  {formatWeightPct(sw)} → {formatWeightPct(lbp.update.endWeights[i] ?? '0')}
-                </Text>
-              </Flex>
+              <StateRow
+                key={i}
+                label={tokens[i]?.symbol ?? `token ${i}`}
+                value={`${formatWeightPct(sw)} → ${formatWeightPct(lbp.update.endWeights[i] ?? '0')}`}
+              />
             ))}
           </VStack>
         </Box>
@@ -502,11 +485,11 @@ function StableSurgeSection({
 
 // Fixed pixel width for the label column on `md+`. Using exact width
 // (not `minWidth`) so every section's rows align to the same x-position
-// regardless of label content. 160px matches frontend-v3's
-// PoolAttributes convention and comfortably fits every label we render
-// today (longest are ~130px — "Pool-creator yield", "Swap-fee manager",
-// "Aggregate swap fee").
-const STATE_LABEL_WIDTH = '160px'
+// regardless of label content. 180px comfortably fits every label we
+// render today (longest are ~130px — "Pool-creator yield", "Swap-fee
+// manager", "Aggregate swap fee") with extra breathing room before the
+// value column.
+const STATE_LABEL_WIDTH = '280px'
 
 function StateRow({
   label,
@@ -521,13 +504,13 @@ function StateRow({
   // on `md+` with no `align` prop (Chakra's default `flex-start` lines
   // the value's first text line up with the label's first text line),
   // a fixed-width label box on `md+`, `:` suffix on the label, and the
-  // value sitting flush after a `md` spacing gap. No `flex` or
-  // `textAlign='right'` on the value — values therefore start at the
+  // value sitting flush after a `1.3rem` spacing gap (md + 30%). No `flex`
+  // or `textAlign='right'` on the value — values therefore start at the
   // same x position across every row.
   return (
     <Stack
       direction={{ base: 'column', md: 'row' }}
-      spacing={{ base: '2xs', md: 'md' }}
+      spacing={{ base: '2xs', md: '1.3rem' }}
       w="full"
     >
       <Box flexShrink={0} w={{ md: STATE_LABEL_WIDTH }}>
@@ -560,6 +543,10 @@ function StateRow({
  * block conditionally hides.
  */
 function AmpFactorRows({ stable: s }: { stable: StableTypeState }): React.JSX.Element {
+  const showRamp =
+    s.amplificationState.endTime > 0 &&
+    s.amplificationState.startValue !== s.amplificationState.endValue
+  const precision = s.amplificationParameter.precision
   return (
     <>
       <Divider />
@@ -569,7 +556,7 @@ function AmpFactorRows({ stable: s }: { stable: StableTypeState }): React.JSX.El
         value={
           <HStack spacing="xs">
             <Text fontFamily="mono" fontSize="sm">
-              {formatAmp(s.amplificationParameter.value, s.amplificationParameter.precision)}
+              {formatAmp(s.amplificationParameter.value, precision)}
             </Text>
             {s.amplificationParameter.isUpdating && (
               <Badge colorScheme="purple" size="sm">
@@ -579,50 +566,23 @@ function AmpFactorRows({ stable: s }: { stable: StableTypeState }): React.JSX.El
           </HStack>
         }
       />
-      {s.amplificationState.endTime > 0 &&
-        s.amplificationState.startValue !== s.amplificationState.endValue && (
-          <Box borderColor="border.base" borderLeft="2px solid" pl="md">
-            <Text fontSize="xs" mb="xs" variant="secondary">
-              Ramp schedule
-            </Text>
-            <VStack align="stretch" spacing="2xs">
-              <Flex flexWrap="wrap" gap="sm" justify="space-between">
-                <Text fontSize="xs" variant="secondary">
-                  start
-                </Text>
-                <Text
-                  fontFamily="mono"
-                  fontSize="xs"
-                  textAlign="right"
-                  wordBreak="break-word"
-                >
-                  {formatAmp(
-                    s.amplificationState.startValue,
-                    s.amplificationParameter.precision
-                  )}{' '}
-                  · {formatTimestamp(s.amplificationState.startTime)}
-                </Text>
-              </Flex>
-              <Flex flexWrap="wrap" gap="sm" justify="space-between">
-                <Text fontSize="xs" variant="secondary">
-                  end
-                </Text>
-                <Text
-                  fontFamily="mono"
-                  fontSize="xs"
-                  textAlign="right"
-                  wordBreak="break-word"
-                >
-                  {formatAmp(
-                    s.amplificationState.endValue,
-                    s.amplificationParameter.precision
-                  )}{' '}
-                  · {formatTimestamp(s.amplificationState.endTime)}
-                </Text>
-              </Flex>
-            </VStack>
-          </Box>
-        )}
+      {/* Ramp start/target as plain StateRows so their values sit on the same
+          160px tab as every other row (was a flush-right space-between block,
+          which pushed the values far to the right of the tab). */}
+      {showRamp && (
+        <>
+          <StateRow
+            hint="ramp start"
+            label="Ramp from"
+            value={`${formatAmp(s.amplificationState.startValue, precision)} · ${formatTimestamp(s.amplificationState.startTime)}`}
+          />
+          <StateRow
+            hint="ramp target"
+            label="Ramp to"
+            value={`${formatAmp(s.amplificationState.endValue, precision)} · ${formatTimestamp(s.amplificationState.endTime)}`}
+          />
+        </>
+      )}
     </>
   )
 }
@@ -689,6 +649,20 @@ export function PoolStatePanel({
       }}
     />
   ) : null
+  // Amp-factor update is V3 STABLE-only. Static link for now — the ops
+  // builder doesn't yet take query params to preload the pool's current
+  // amp / ramp config, so we can't deep-link the pool in (unlike the surge
+  // and reCLAMM builders above).
+  const ampUpdateButton =
+    isV3 && s ? (
+      <ManageButton
+        link={{
+          label: 'Update amp factor',
+          hint: 'V3 amplification-factor update payload builder',
+          href: `${OPS_BASE}/payload-builder/amp-factor-update-v3`,
+        }}
+      />
+    ) : null
 
   // Each `state.*` slot is at most one block per pool — gather the
   // type-specific Card to render in the grid as a single ReactNode so
@@ -774,6 +748,7 @@ export function PoolStatePanel({
               </>
             )}
             {feeSetterButton}
+            {ampUpdateButton}
           </TypeSection>
         )}
 

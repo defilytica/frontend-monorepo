@@ -17,7 +17,7 @@ import {
 import Link from 'next/link'
 import { ChevronRight, ExternalLink, Home } from 'react-feather'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import { useCallback, useState, useTransition } from 'react'
+import { useCallback, useEffect, useState, useTransition } from 'react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
 import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
 import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
@@ -85,6 +85,16 @@ function RangeChangeOverlay({
 
 export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Element {
   const { poolDetail, snapshots, events, state, range } = data
+
+  // Next's App Router scroll-to-top on navigation is unreliable when the
+  // route has a `loading.tsx` Suspense boundary — landing on a pool page
+  // can keep the previous page's scroll offset. Reset explicitly once the
+  // resolved content commits (last writer wins over Next's own attempt).
+  // Keyed on pool identity only, so toggling `?range=` doesn't yank the
+  // user back to the top while they're reading the chart.
+  useEffect(() => {
+    window.scrollTo({ top: 0 })
+  }, [poolDetail.chain, poolDetail.id])
   const RANGE_LABEL: Record<typeof range, string> = {
     '30d': '30-day history',
     '90d': '90-day history',

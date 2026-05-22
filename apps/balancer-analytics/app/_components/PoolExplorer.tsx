@@ -2,7 +2,6 @@
 
 import {
   Box,
-  Button,
   Card,
   Flex,
   Grid,
@@ -12,7 +11,6 @@ import {
   Text,
   VStack,
 } from '@chakra-ui/react'
-import { DownloadIcon } from '@chakra-ui/icons'
 import Link from 'next/link'
 import { useCallback, useMemo } from 'react'
 import {
@@ -77,69 +75,6 @@ function getPoolHref(p: EnrichedPool): string {
   return `/pool/${slug}/${p.id}`
 }
 
-function buildCsv(rows: EnrichedPool[]): string {
-  const headers = [
-    'name',
-    'symbol',
-    'chain',
-    'type',
-    'protocolVersion',
-    'hook',
-    'address',
-    'id',
-    'tvl',
-    'volume24h',
-    'fees24h',
-    'totalApr',
-    'yieldApr',
-    'yieldPerDay',
-    'usage24h',
-    'holders',
-    'swapFee',
-  ]
-  const escape = (val: unknown) => {
-    const s = String(val ?? '')
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const lines = rows.map(p =>
-    [
-      p.name,
-      p.symbol,
-      p.chain,
-      p.type,
-      p.protocolVersion,
-      p._hookType ?? '',
-      p.address,
-      p.id,
-      Number(p.dynamicData.totalLiquidity ?? 0),
-      Number(p.dynamicData.volume24h ?? 0),
-      Number(p.dynamicData.fees24h ?? 0),
-      p._totalApr,
-      p._yieldApr,
-      p._yieldPerDay,
-      p._usage,
-      p._holders,
-      Number(p.dynamicData.swapFee ?? 0),
-    ]
-      .map(escape)
-      .join(',')
-  )
-  return [headers.join(','), ...lines].join('\n')
-}
-
-function downloadCsv(rows: EnrichedPool[]) {
-  const csv = buildCsv(rows)
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `balancer-pools-${new Date().toISOString().slice(0, 19)}.csv`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
 export function PoolExplorer() {
   // URL state — shareable view. SearchInput debounces internally, so we point
   // it directly at the nuqs param rather than maintaining a separate draft.
@@ -170,7 +105,10 @@ export function PoolExplorer() {
     parseAsStringLiteral(['asc', 'desc'] as const).withDefault('desc')
   )
   const [pageIndex, setPageIndex] = useQueryState('page', parseAsInteger.withDefault(0))
-  const [pageSize, setPageSize] = useQueryState('size', parseAsInteger.withDefault(25))
+  // Default 20 — must be one of the pagination dropdown's options
+  // ([10, 20, 30, 40, 50]); a value outside that set (e.g. 25) leaves the
+  // <Select> with no matching option and it visually falls back to "10".
+  const [pageSize, setPageSize] = useQueryState('size', parseAsInteger.withDefault(20))
 
   const filters = useMemo(
     () => ({
@@ -190,7 +128,6 @@ export function PoolExplorer() {
     totalCount,
     filteredCount,
     pageItems,
-    allFilteredSorted,
     availableChains,
     availableTypes,
     availableHooks,
@@ -267,7 +204,7 @@ export function PoolExplorer() {
   )
 
   return (
-    <Card overflow="hidden" p={{ base: 'sm', md: 'md' }} variant="level1">
+    <Card overflow="hidden" variant="level1">
       <VStack align="stretch" spacing="md">
         <Flex align="flex-start" gap="md" justify="space-between">
           <VStack align="flex-start" spacing="xs">
@@ -278,15 +215,6 @@ export function PoolExplorer() {
             </Text>
           </VStack>
           <Stack align="stretch" direction="column" minW="120px" spacing="xs">
-            <Button
-              isDisabled={!allFilteredSorted.length}
-              leftIcon={<DownloadIcon />}
-              onClick={() => downloadCsv(allFilteredSorted)}
-              size="sm"
-              variant="tertiary"
-            >
-              CSV
-            </Button>
             <PoolExplorerFilters
               availableChains={availableChains}
               availableHooks={availableHooks}

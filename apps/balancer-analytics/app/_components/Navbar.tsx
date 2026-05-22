@@ -1,6 +1,6 @@
 'use client'
 
-import { Box, Container, HStack, Heading, Link } from '@chakra-ui/react'
+import { Badge, Box, Container, HStack, Heading, Link } from '@chakra-ui/react'
 import Image from 'next/image'
 import NextLink from 'next/link'
 import { motion } from 'motion/react'
@@ -91,33 +91,47 @@ export function Navbar() {
         <Container h="full" maxW="maxContent" px={['ms', 'md']}>
           <HStack align="center" h="full" justify="space-between" w="full">
             <HStack spacing="xl">
-              <Link
-                _hover={{ textDecoration: 'none' }}
-                aria-label="DeFilytica homepage"
-                as={NextLink}
-                href="https://defilytica.com"
-                isExternal
-                rel="noopener noreferrer"
-              >
-                <HStack spacing="sm">
-                  <Image
-                    alt="DeFilytica"
-                    height={28}
-                    priority
-                    src="/images/defilytica.png"
-                    width={28}
-                  />
-                  <Heading
-                    display={{ base: 'none', sm: 'block' }}
-                    fontSize="md"
-                    fontWeight="bold"
-                    letterSpacing="-0.2px"
-                    size="h6"
-                  >
-                    DeFilytica
-                  </Heading>
-                </HStack>
-              </Link>
+              <HStack spacing="sm">
+                <Link
+                  _hover={{ textDecoration: 'none' }}
+                  aria-label="DeFilytica homepage"
+                  as={NextLink}
+                  href="https://defilytica.com"
+                  isExternal
+                  rel="noopener noreferrer"
+                >
+                  <HStack spacing="sm">
+                    <Image
+                      alt="DeFilytica"
+                      height={28}
+                      priority
+                      src="/images/defilytica.png"
+                      width={28}
+                    />
+                    <Heading
+                      display={{ base: 'none', sm: 'block' }}
+                      fontSize="md"
+                      fontWeight="bold"
+                      letterSpacing="-0.2px"
+                      size="h6"
+                    >
+                      DeFilytica
+                    </Heading>
+                  </HStack>
+                </Link>
+
+                <Badge
+                  aria-label="Alpha release"
+                  colorScheme="orange"
+                  fontSize="0.65rem"
+                  letterSpacing="0.5px"
+                  size="sm"
+                  textTransform="uppercase"
+                  variant="subtle"
+                >
+                  Alpha
+                </Badge>
+              </HStack>
 
               <HStack display={{ base: 'none', md: 'flex' }} spacing="lg">
                 {NAV_LINKS.map(link => {

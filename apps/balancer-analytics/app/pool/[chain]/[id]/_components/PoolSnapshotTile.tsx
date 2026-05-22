@@ -191,7 +191,6 @@ export function PoolSnapshotTile({
           <Heading size="h5">Metrics</Heading>
           <MetricRow
             delta={tvlDelta}
-            hint="vs 24h ago"
             label="TVL"
             value={usdCompact(tvl)}
           />

@@ -54,7 +54,7 @@ export function Governance() {
     <Card variant="level1">
       <Flex align="center" justify="space-between" mb="md">
         <HStack spacing="sm">
-          <Heading size="h6">Governance</Heading>
+          <Heading size="h5">Governance</Heading>
           <Badge colorScheme="purple" size="sm" variant="subtle">
             balancer.eth
           </Badge>

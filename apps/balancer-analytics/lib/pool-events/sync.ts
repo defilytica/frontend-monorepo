@@ -46,6 +46,7 @@ import {
   V2_NON_STABLE_FILTER_B_EVENTS,
 } from './event-signatures'
 import { decodeLogsToRows } from './decode'
+import { stripFeeRebates } from './cow-rebate'
 import { ninetyDayFromBlock, thirtyDayFromBlock } from './initial-cap'
 import type { PoolParamEvent } from './types'
 
@@ -150,7 +151,7 @@ async function runSync(
   if (!options.force && !needDeepScan && state) {
     const ageSeconds = (Date.now() - state.lastSyncedAt.getTime()) / 1000
     if (ageSeconds < ttl) {
-      const rows = await getPoolParamEvents(chain, pool)
+      const rows = await readCleanEvents(chain, pool)
       const metadata = await fetchPoolMetadata(chain, apiV3Id).catch(() => null)
       return {
         events: rows.map(toWireEvent),
@@ -261,7 +262,7 @@ async function runSync(
   if (fromBlock > safeHead) {
     // Nothing new — happens when last_block already advanced past head - 12.
     await upsertPoolSyncState(chain, pool, Number(state?.lastBlock ?? safeHead))
-    const rows = await getPoolParamEvents(chain, pool)
+    const rows = await readCleanEvents(chain, pool)
     return {
       events: rows.map(toWireEvent),
       lastBlock: Number(state?.lastBlock ?? safeHead),
@@ -368,16 +369,23 @@ async function runSync(
     blockTimestamps: timestamps,
   })
 
+  // Drop CoW-settlement fee rebates (lower-then-restore within one tx) before
+  // anything else. This must run *before* the V2 hard cap: on a busy
+  // CoW-integrated pool the rebate churn would otherwise fill the cap and
+  // evict the handful of genuine Gauntlet fee-setter changes we actually
+  // want. See `cow-rebate.ts`.
+  const { rows: cleanedRows, stripped: rebatesStripped } = stripFeeRebates(decodedRows)
+
   // V2 hard cap: keep only the newest `V2_EVENT_HARD_CAP` rows from this
   // scan. A pool firing dynamic-fee changes every block could otherwise
   // produce hundreds of writes in one cold scan — bounded by 30-day window
   // upstream, this caps it again at the row count level. We sort by
   // (block_number, log_index) DESC and slice, then re-sort ASC for
   // deterministic insert order.
-  let newRows = decodedRows
+  let newRows = cleanedRows
   let v2Capped = 0
-  if (metadata.protocolVersion === 2 && decodedRows.length > V2_EVENT_HARD_CAP) {
-    const sorted = [...decodedRows].sort((a, b) =>
+  if (metadata.protocolVersion === 2 && cleanedRows.length > V2_EVENT_HARD_CAP) {
+    const sorted = [...cleanedRows].sort((a, b) =>
       a.blockNumber === b.blockNumber
         ? b.logIndex - a.logIndex
         : b.blockNumber - a.blockNumber
@@ -388,7 +396,7 @@ async function runSync(
         ? a.logIndex - b.logIndex
         : a.blockNumber - b.blockNumber
     )
-    v2Capped = decodedRows.length - kept.length
+    v2Capped = cleanedRows.length - kept.length
     newRows = kept
   }
 
@@ -399,6 +407,7 @@ async function runSync(
       pool,
       rowsInserted: newRows.length,
       decoded: decodedRows.length,
+      rebatesStripped,
       v2Capped,
       eventNames: Array.from(new Set(newRows.map(r => r.eventName))),
     })
@@ -418,7 +427,7 @@ async function runSync(
     await upsertPoolSyncState(chain, pool, Number(safeHead), scannedFullHistory)
   }
 
-  const allRows = await getPoolParamEvents(chain, pool)
+  const allRows = await readCleanEvents(chain, pool)
   return {
     events: allRows.map(toWireEvent),
     lastBlock: Number(safeHead),
@@ -530,6 +539,16 @@ async function fetchPoolMetadata(
   }
   metadataCache.set(key, { value, expiresAt: Date.now() + POOL_METADATA_TTL_MS })
   return value
+}
+
+/**
+ * Read a pool's persisted timeline with CoW fee rebates stripped. Applied on
+ * every return path (cached, no-new-blocks, post-scan) so the display layer
+ * never sees rebate round-trips — including rows written before the
+ * decode-time filter existed, which this cleans on read without a migration.
+ */
+async function readCleanEvents(chain: GqlChain, pool: string): Promise<PoolParamEventRow[]> {
+  return stripFeeRebates(await getPoolParamEvents(chain, pool)).rows
 }
 
 function toWireEvent(row: PoolParamEventRow): PoolParamEvent {

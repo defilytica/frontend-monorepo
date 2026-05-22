@@ -377,12 +377,7 @@ export function TvlOverviewChart() {
       : null
 
   return (
-    <Card
-      overflow="hidden"
-      p={{ base: 'sm', md: 'md' }}
-      position="relative"
-      variant="level1"
-    >
+    <Card overflow="hidden" position="relative" variant="level1">
       <VStack align="stretch" spacing="md">
         <Flex align="flex-start" flexWrap="wrap" gap="ms" justify="space-between">
           <VStack align="flex-start" spacing="xs">

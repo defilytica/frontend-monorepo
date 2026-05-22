@@ -135,12 +135,17 @@ async function fetchRows(days: AllowedDays, granularity: Granularity): Promise<D
   const cutoff = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60
   // Daily mode: DISTINCT ON returns one row per (chain, protocol, UTC day),
   // keeping the latest reading inside that day (ORDER BY ... ts DESC). The
-  // outer SELECT re-sorts ascending because downstream `byTs` folding assumes
-  // ts-ASC. Defillama backfill rows pre-cron are already daily — they pass
-  // through unchanged.
+  // kept `ts` differs across (chain, protocol) within a day — e.g. the
+  // api-v3 cron writes CORE at top-of-hour while DefiLlama backfill writes
+  // V2/V3 at UTC midnight — so we MUST re-key the output `ts` to the UTC
+  // day start `(ts / 86400) * 86400`. Otherwise `foldRows` groups by the raw
+  // ts and a single day splits into two points (CORE on one, V2/V3 on the
+  // other) → duplicate bars/points per day. Normalizing collapses every
+  // row of a day onto one timestamp so they fold into one complete point.
   if (granularity === 'daily') {
     return (await sql`
-      SELECT ts, chain, protocol, total_liquidity, swap_volume_24h, swap_fee_24h,
+      SELECT (latest.ts / 86400) * 86400 AS ts, chain, protocol,
+             total_liquidity, swap_volume_24h, swap_fee_24h,
              yield_capture_24h, surplus_24h, pool_count, num_lps, source
       FROM (
         SELECT DISTINCT ON (chain, protocol, ts / 86400)
@@ -150,7 +155,7 @@ async function fetchRows(days: AllowedDays, granularity: Granularity): Promise<D
         WHERE ts >= ${cutoff}
         ORDER BY chain, protocol, ts / 86400, ts DESC
       ) latest
-      ORDER BY ts ASC
+      ORDER BY 1 ASC
     `) as DbRow[]
   }
   return (await sql`
