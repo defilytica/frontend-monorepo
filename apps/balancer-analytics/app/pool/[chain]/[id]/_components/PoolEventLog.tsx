@@ -104,8 +104,9 @@ const INLINE_CHIP_THRESHOLD = 4
 // horizontal scroll just to read one event.
 const GRID_COLS = {
   base: '1fr',
-  // 170px gives `DD.MM.YYYY, HH:mm` mono enough room without wrapping.
-  md: '170px 220px minmax(0, 1fr) 130px',
+  // 180px gives `DD.MM.YYYY, HH:mm` mono enough room at the larger row font
+  // without wrapping; 150px keeps the truncated tx hash on one line.
+  md: '180px 220px minmax(0, 1fr) 150px',
 }
 
 // ── Category filter widgets ───────────────────────────────────────────
@@ -216,7 +217,7 @@ function ArgList({ args }: { args: Record<string, string | number | boolean> }):
   const entries = Object.entries(args)
   if (entries.length === 0) {
     return (
-      <Text color="font.secondary" fontSize="xs">
+      <Text color="font.secondary" fontSize="sm">
         —
       </Text>
     )
@@ -242,10 +243,10 @@ function ArgList({ args }: { args: Record<string, string | number | boolean> }):
             gap={{ base: '2xs', md: 'xs' }}
             key={k}
           >
-            <Text color="font.secondary" fontSize="2xs">
+            <Text color="font.secondary" fontSize="xs">
               {k}
             </Text>
-            <Text fontFamily="mono" fontSize="xs" wordBreak="break-word">
+            <Text fontFamily="mono" fontSize="sm" wordBreak="break-word">
               {formatEventArgValue(k, v)}
               {i < entries.length - 1 && (
                 <Text
@@ -282,22 +283,22 @@ function EventHeader(): React.JSX.Element {
       w="full"
     >
       <GridItem>
-        <Text color="font.secondary" fontSize="xs" fontWeight="bold">
+        <Text color="font.secondary" fontSize="sm" fontWeight="bold">
           When
         </Text>
       </GridItem>
       <GridItem>
-        <Text color="font.secondary" fontSize="xs" fontWeight="bold">
+        <Text color="font.secondary" fontSize="sm" fontWeight="bold">
           Event
         </Text>
       </GridItem>
       <GridItem>
-        <Text color="font.secondary" fontSize="xs" fontWeight="bold">
+        <Text color="font.secondary" fontSize="sm" fontWeight="bold">
           Arguments
         </Text>
       </GridItem>
       <GridItem justifySelf="end">
-        <Text color="font.secondary" fontSize="xs" fontWeight="bold">
+        <Text color="font.secondary" fontSize="sm" fontWeight="bold">
           Tx
         </Text>
       </GridItem>
@@ -312,7 +313,7 @@ function MobileLabel({ children }: { children: React.ReactNode }): React.JSX.Ele
     <Text
       color="font.secondary"
       display={{ base: 'block', md: 'none' }}
-      fontSize="2xs"
+      fontSize="xs"
       fontWeight="bold"
       mb="2xs"
       textTransform="uppercase"
@@ -356,7 +357,7 @@ function EventRow({
               start of the row. */}
           <Text
             fontFamily="mono"
-            fontSize="xs"
+            fontSize="sm"
             title={dateFullFmt.format(new Date(event.blockTimestamp * 1000))}
             whiteSpace="nowrap"
           >
@@ -367,7 +368,7 @@ function EventRow({
           <MobileLabel>Event</MobileLabel>
           <HStack spacing="xs">
             <Box bg={style.color} borderRadius="full" flexShrink={0} h="8px" w="8px" />
-            <Text fontSize="xs" fontWeight="500" noOfLines={1}>
+            <Text fontSize="sm" fontWeight="500" noOfLines={1}>
               {style.legendLabel}
             </Text>
           </HStack>
@@ -375,7 +376,7 @@ function EventRow({
             color="font.secondary"
             display={{ base: 'block', md: 'none' }}
             fontFamily="mono"
-            fontSize="2xs"
+            fontSize="xs"
             noOfLines={1}
           >
             {event.eventName}
@@ -387,7 +388,7 @@ function EventRow({
         </GridItem>
         <GridItem
           fontFamily="mono"
-          fontSize="xs"
+          fontSize="sm"
           justifySelf={{ base: 'start', md: 'end' }}
         >
           <MobileLabel>Tx</MobileLabel>
