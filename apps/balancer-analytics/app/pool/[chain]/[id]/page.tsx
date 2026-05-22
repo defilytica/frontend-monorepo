@@ -342,7 +342,13 @@ export default async function Page({
       'poolGetSnapshots',
       { forceFresh: forceRefresh }
     ),
-    syncPoolEvents(chain, contractAddress, { force: forceRefresh, fullHistory }).catch(
+    syncPoolEvents(chain, contractAddress, {
+      force: forceRefresh,
+      fullHistory,
+      // V2 pools need the 66-char poolId for `poolGetPool` to resolve;
+      // the contract address would 404 and poison the watermark.
+      apiV3Id: apiV3Id,
+    }).catch(
       (err: unknown) => {
         logRpcError('[pool/page] syncPoolEvents failed', chain, contractAddress, err)
         return { events: [], lastBlock: 0, cached: false, poolType: null, protocolVersion: null }

@@ -25,7 +25,7 @@ import 'server-only'
 import type { Address } from 'viem'
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import {
-  ensureSchema,
+  ensureSchemaOnce,
   countPoolParamEvents,
   getPoolParamEvents,
   getPoolSyncState,
@@ -46,12 +46,18 @@ import {
   V2_NON_STABLE_FILTER_B_EVENTS,
 } from './event-signatures'
 import { decodeLogsToRows } from './decode'
-import { ninetyDayFromBlock } from './initial-cap'
+import { ninetyDayFromBlock, thirtyDayFromBlock } from './initial-cap'
 import type { PoolParamEvent } from './types'
 
 const SYNC_TTL_SECONDS = 30
 const REORG_CONFIRMATIONS = 12n
 const POOL_METADATA_TTL_MS = 5 * 60 * 1000
+// Hard ceiling on the rows persisted per V2 cold scan. The 30-day window
+// already trims most noise; this catches the pathological case of a pool
+// that fires `SwapFeePercentageChanged` on every swap (e.g. a Gyro V2 pool
+// with a controller). We keep the newest N — the chart's event markers
+// only need recent signal; the rest is historic noise.
+const V2_EVENT_HARD_CAP = 100
 
 const API_URL =
   process.env.NEXT_PUBLIC_BALANCER_API_URL ?? 'https://api-v3.balancer.fi/graphql'
@@ -59,23 +65,6 @@ const API_URL =
 /** In-flight dedupe so N concurrent requests for the same pool collapse to
  *  one RPC fan-out. */
 const inflight = new Map<string, Promise<SyncResult>>()
-
-/** Lazy + memoized schema bootstrap. The route handler also calls
- *  `ensureSchema` but the server-page entry path doesn't, so we need it
- *  here too. Shared promise so concurrent first-callers don't double-run
- *  the migration. */
-let schemaPromise: Promise<void> | null = null
-function ensureSchemaOnce(): Promise<void> {
-  if (!schemaPromise) {
-    schemaPromise = ensureSchema().catch(err => {
-      // Reset on failure so the next call retries — better than wedging the
-      // route in a permanently-broken state on a transient DB hiccup.
-      schemaPromise = null
-      throw err
-    })
-  }
-  return schemaPromise
-}
 
 type PoolMetadata = {
   type: string
@@ -93,6 +82,12 @@ export type SyncOptions = {
    *  floor, so a tail-sync can never reach older history). ~150 RPC
    *  requests for a multi-year mainnet pool — negligible per §7. */
   fullHistory?: boolean
+  /** Canonical api-v3 pool id used for the metadata lookup. V3 pools have
+   *  `id === address` (42-char), so omitting this works. V2 / CowAmm pools
+   *  have a 66-char id (`address + type + nonce`) and `poolGetPool(id=42)`
+   *  returns "Pool with id does not exist" — pass the URL form here to
+   *  avoid that. Defaults to `poolAddress` (correct for V3). */
+  apiV3Id?: string
 }
 
 export type SyncResult = {
@@ -147,11 +142,16 @@ async function runSync(
   // full-history request on an already-deep-synced pool does NOT — it falls
   // through to the cached/warm path so we don't re-walk the chain every
   // time someone opens a `?fullHistory` URL.
+  // Canonical api-v3 id — for V3 pools id === address, so passing the
+  // 20-byte form works; for V2 pools we need the 66-char form. The
+  // caller (page/route) knows the URL and threads it through `apiV3Id`.
+  const apiV3Id = options.apiV3Id ?? pool
+
   if (!options.force && !needDeepScan && state) {
     const ageSeconds = (Date.now() - state.lastSyncedAt.getTime()) / 1000
     if (ageSeconds < ttl) {
       const rows = await getPoolParamEvents(chain, pool)
-      const metadata = await fetchPoolMetadata(chain, pool).catch(() => null)
+      const metadata = await fetchPoolMetadata(chain, apiV3Id).catch(() => null)
       return {
         events: rows.map(toWireEvent),
         lastBlock: state.lastBlock,
@@ -163,14 +163,24 @@ async function runSync(
   }
 
   // ── Resolve pool metadata (cheap api-v3 hit, cached) ──
-  const metadata = await fetchPoolMetadata(chain, pool)
+  const metadata = await fetchPoolMetadata(chain, apiV3Id)
   if (!metadata) {
-    // Pool not found on api-v3. Still upsert the sync state so we don't
-    // hammer the API on repeated 404 visits; return an empty result.
-    const client = getPublicClient(chain)
-    const head = await client.getBlockNumber()
-    await upsertPoolSyncState(chain, pool, Number(head))
-    return { events: [], lastBlock: Number(head), cached: false, poolType: null, protocolVersion: null }
+    // Metadata lookup failed — could be a transient api-v3 hiccup
+    // (Cloudflare rate limit, GraphQL schema drift, etc.) or a genuine
+    // not-found. We CANNOT advance the watermark here: doing so poisoned
+    // the V2 BAL8020 sync earlier (id-shape mismatch returned an error,
+    // we treated it as 404, advanced past 8.9k real events). Keep the
+    // existing state untouched so the next visit retries the lookup;
+    // the gqlFetch wrapper already logs the failure mode so a real
+    // not-found surfaces in the dev log.
+    const lastBlock = state?.lastBlock ?? 0
+    return {
+      events: [],
+      lastBlock,
+      cached: false,
+      poolType: null,
+      protocolVersion: null,
+    }
   }
 
   const client = getPublicClient(chain)
@@ -224,16 +234,24 @@ async function runSync(
       const ageBlocks = BigInt(Math.ceil(ageSec * estimateBlocksPerSecond(chain)))
       createBlock = safeHead > ageBlocks ? safeHead - ageBlocks : 0n
     }
-    const cap = ninetyDayFromBlock(chain, safeHead)
+    // V2 pools (dynamic-fee / amp updates) are noisy — some pools fire
+    // dozens of `SwapFeePercentageChanged` per quarter. Capping the cold
+    // window to 30 days (vs 90 for V3) plus the post-decode 100-event
+    // hard-cap below keeps DB writes bounded for noisy pools without
+    // losing the recent signal that drives the chart's event markers.
+    const cap =
+      metadata.protocolVersion === 2
+        ? thirtyDayFromBlock(chain, safeHead)
+        : ninetyDayFromBlock(chain, safeHead)
     if (options.fullHistory && createBlock !== null) {
-      // Full history — scan from the (approx) deployment block, no 90-day
+      // Full history — scan from the (approx) deployment block, no cap
       // floor. Requires a known `createTime`; without it we'd be scanning
       // from genesis (500+ chunks on a mature mainnet), so we fall back to
-      // the 90-day cap below rather than burn that range blind.
+      // the cap below rather than burn that range blind.
       fromBlock = createBlock
       scannedFullHistory = true
     } else {
-      // Cold (or full-history with unknown createTime) — 90-day cap, raised
+      // Cold (or full-history with unknown createTime) — cap floor, raised
       // to the deployment block when the pool is younger than the cap (no
       // point scanning before it existed).
       fromBlock = createBlock !== null && createBlock > cap ? createBlock : cap
@@ -343,18 +361,45 @@ async function runSync(
   const timestamps = await resolveBlockTimestamps(client, chain, uniqueBlocks)
 
   // ── Decode + persist ──
-  const newRows = decodeLogsToRows(allLogs, {
+  const decodedRows = decodeLogsToRows(allLogs, {
     chain,
     poolAddress: pool,
     protocolVersion: metadata.protocolVersion,
     blockTimestamps: timestamps,
   })
+
+  // V2 hard cap: keep only the newest `V2_EVENT_HARD_CAP` rows from this
+  // scan. A pool firing dynamic-fee changes every block could otherwise
+  // produce hundreds of writes in one cold scan — bounded by 30-day window
+  // upstream, this caps it again at the row count level. We sort by
+  // (block_number, log_index) DESC and slice, then re-sort ASC for
+  // deterministic insert order.
+  let newRows = decodedRows
+  let v2Capped = 0
+  if (metadata.protocolVersion === 2 && decodedRows.length > V2_EVENT_HARD_CAP) {
+    const sorted = [...decodedRows].sort((a, b) =>
+      a.blockNumber === b.blockNumber
+        ? b.logIndex - a.logIndex
+        : b.blockNumber - a.blockNumber
+    )
+    const kept = sorted.slice(0, V2_EVENT_HARD_CAP)
+    kept.sort((a, b) =>
+      a.blockNumber === b.blockNumber
+        ? a.logIndex - b.logIndex
+        : a.blockNumber - b.blockNumber
+    )
+    v2Capped = decodedRows.length - kept.length
+    newRows = kept
+  }
+
   if (newRows.length > 0) {
     await insertPoolParamEvents(newRows)
     console.info('[sync] decoded + persisted events', {
       chain,
       pool,
       rowsInserted: newRows.length,
+      decoded: decodedRows.length,
+      v2Capped,
       eventNames: Array.from(new Set(newRows.map(r => r.eventName))),
     })
   }
@@ -425,9 +470,15 @@ function estimateBlocksPerSecond(chain: GqlChain): number {
 
 async function fetchPoolMetadata(
   chain: GqlChain,
-  poolAddress: string
+  apiV3Id: string
 ): Promise<PoolMetadata | null> {
-  const key = `${chain}:${poolAddress.toLowerCase()}`
+  // The id is what api-v3 keys on — 42-char for V3, 66-char for V2 — so
+  // the cache key MUST use the same value the query uses. Earlier this
+  // was hard-coded to the 20-byte contract address, which would have
+  // happily served stale metadata after switching pools that share the
+  // same underlying address (rare but possible).
+  const id = apiV3Id.toLowerCase()
+  const key = `${chain}:${id}`
   const cached = metadataCache.get(key)
   if (cached && cached.expiresAt > Date.now()) return cached.value
 
@@ -443,7 +494,7 @@ async function fetchPoolMetadata(
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables: { id: poolAddress.toLowerCase(), chain } }),
+    body: JSON.stringify({ query, variables: { id, chain } }),
     cache: 'no-store',
   })
   // Mirror the page-side `gqlFetch` logging — silent `null` here would
@@ -452,7 +503,7 @@ async function fetchPoolMetadata(
   if (!res.ok) {
     console.warn('[sync] api-v3 fetchPoolMetadata HTTP failure', {
       chain,
-      pool: poolAddress,
+      pool: id,
       status: res.status,
       retryAfter: res.headers.get('retry-after'),
     })
@@ -465,7 +516,7 @@ async function fetchPoolMetadata(
   if (json.errors) {
     console.warn('[sync] api-v3 fetchPoolMetadata GraphQL errors', {
       chain,
-      pool: poolAddress,
+      pool: id,
       errors: json.errors,
     })
     return null

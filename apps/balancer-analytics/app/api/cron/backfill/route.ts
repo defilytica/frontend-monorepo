@@ -41,7 +41,7 @@ import 'server-only'
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import { PROJECT_CONFIG } from '@repo/lib/config/getProjectConfig'
 import {
-  ensureSchema,
+  ensureSchemaOnce,
   sql,
   AGGREGATE_KEY,
   PROTOCOL_CORE,
@@ -367,7 +367,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url)
   const force = url.searchParams.get('force') === '1'
 
-  await ensureSchema()
+  await ensureSchemaOnce()
 
   const ctx: FoldCtx = { unknown: new Set(), unmapped: new Set() }
   const rowsByProtocol: Record<Protocol, SnapshotRow[]> = {

@@ -19,8 +19,11 @@
  * intra-day fidelity, so daily mode is the right default there — payload,
  * network egress, and client-side parsing all drop proportionally.
  *
- * Cached `revalidate = 600` (10 min). Different `granularity` values get
- * independent cache entries, so daily-for-90D and hourly-for-7D coexist.
+ * Cached `revalidate = 3600` (1 hour) to align with the hourly snapshot
+ * cron. Reading more often than the writer produces never yields fresher
+ * data — it only keeps Neon warm and burns compute units. Different
+ * `granularity` values get independent cache entries, so daily-for-90D
+ * and hourly-for-7D coexist.
  */
 
 import 'server-only'
@@ -44,7 +47,9 @@ import type {
 } from '@analytics/lib/snapshots/types'
 
 export const runtime = 'nodejs'
-export const revalidate = 600
+// Match the hourly cron cadence — there's no fresher data between writes,
+// so a tighter revalidate just keeps Neon warm for no benefit.
+export const revalidate = 3600
 
 const DEFAULT_DAYS = 90
 const MAX_DAYS = 365 * 5
@@ -217,7 +222,13 @@ const getSnapshotSeries = unstable_cache(
     return foldRows(rows)
   },
   ['protocol-snapshots'],
-  { revalidate: 600, tags: ['protocol-snapshots'] }
+  // 1-hour TTL matches the cron write cadence. Combined with the
+  // `s-maxage=3600` Cache-Control below, the CDN serves between writes and
+  // the function only re-fetches from Postgres once per (days, granularity)
+  // per hour. With 8 possible (days, granularity) keys, that's a ceiling of
+  // 8 DB reads per hour regardless of traffic — and `stale-while-revalidate`
+  // means visitors never wait for that refresh.
+  { revalidate: 3600, tags: ['protocol-snapshots'] }
 )
 
 export async function GET(req: Request) {
@@ -225,13 +236,17 @@ export async function GET(req: Request) {
   const days = snapDays(url.searchParams.get('days'))
   const granularity = parseGranularity(url.searchParams.get('granularity'))
   const series = await getSnapshotSeries(days, granularity)
-  // Browser/CDN cache too — Next's `revalidate` only caches server-side. With
-  // these headers, navigating back to the dashboard within `max-age` reuses
-  // the response without any HTTP roundtrip; the longer `stale-while-revalidate`
-  // window keeps the UI instant while a background refresh happens.
+  // Browser + CDN cache. `s-maxage=3600` lets the Vercel edge share-cache
+  // the response across visitors for the full snapshot interval; without
+  // it the CDN treats this as private and every visitor reaches the origin
+  // function (which then either hits `unstable_cache` or falls through to
+  // Postgres). `max-age=60` keeps the browser tab snappy on a re-render;
+  // `stale-while-revalidate=86400` lets the next hour-old refresh happen
+  // out of band so navigations never wait on Postgres.
   return Response.json(series, {
     headers: {
-      'Cache-Control': 'public, max-age=60, stale-while-revalidate=600',
+      'Cache-Control':
+        'public, max-age=60, s-maxage=3600, stale-while-revalidate=86400',
     },
   })
 }

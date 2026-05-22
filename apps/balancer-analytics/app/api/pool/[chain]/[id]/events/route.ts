@@ -20,7 +20,7 @@ import { z } from 'zod'
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import { PROJECT_CONFIG } from '@repo/lib/config/getProjectConfig'
 import { ChainSlug, getChainSlug } from '@repo/lib/modules/pool/pool.utils'
-import { ensureSchema } from '@analytics/lib/db'
+import { ensureSchemaOnce } from '@analytics/lib/db'
 import { isDrpcSupportedChain } from '@analytics/lib/contracts/drpc-endpoints'
 import { syncPoolEvents } from '@analytics/lib/pool-events/sync'
 import { scrubError } from '@analytics/lib/drpc/scrub'
@@ -84,10 +84,14 @@ async function handle(
   const fullHistory = new URL(request.url).searchParams.has('fullHistory')
 
   try {
-    await ensureSchema()
+    await ensureSchemaOnce()
     const result = await syncPoolEvents(chain, contractAddress, {
       force: options.force,
       fullHistory,
+      // For V2 / CowAmm pools the URL carries the 66-char poolId; pass it
+      // through so `poolGetPool` resolves (the 20-byte contract address
+      // would 404 against api-v3 and poison the watermark).
+      apiV3Id: rawId,
     })
     const payload: PoolEventsResponse = {
       pool: contractAddress,

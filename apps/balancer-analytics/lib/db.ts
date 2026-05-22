@@ -29,6 +29,26 @@ if (!dbUrl) {
 
 export const sql = neon(dbUrl)
 
+// ── Per-op structured logging ──────────────────────────────────────────────
+// Each Neon HTTP roundtrip emits one log line of `{ op, helper, ms }`. Post-
+// deploy the only lines should be `op: 'write'` at cron cadence (~1/hr) and
+// the pool-page read pair (`getPoolSyncState`, `getPoolParamEvents`) capped
+// at one per (chain, pool) per `SYNC_TTL_SECONDS`. Anything else on a
+// sub-minute timer is a regression and worth chasing.
+type DbOp = 'read' | 'write' | 'ddl'
+
+async function trackDbOp<T>(op: DbOp, helper: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now()
+  try {
+    const result = await fn()
+    console.info('[db]', { op, helper, ms: Date.now() - start, ok: true })
+    return result
+  } catch (err) {
+    console.warn('[db]', { op, helper, ms: Date.now() - start, ok: false, err: String(err) })
+    throw err
+  }
+}
+
 export const AGGREGATE_KEY = 'ALL' as const
 
 export const PROTOCOL_CORE = 'CORE' as const
@@ -65,6 +85,26 @@ export type SnapshotRow = {
   poolCount: number
   numLps: number
   source: SnapshotSource
+}
+
+// `ensureSchema` runs ~13 idempotent DDL statements. That's a *huge* share
+// of the per-request DB roundtrip count on routes that called it on every
+// hit (the events route used to). `ensureSchemaOnce` memoizes the result
+// per warm function instance so cold-start pays the DDL cost once, and
+// every subsequent request inside that instance pays zero. The schema is
+// idempotent, so re-running on the next cold start is also safe — we just
+// don't want to pay 13 round trips per request when the table already exists.
+let schemaPromise: Promise<void> | null = null
+export function ensureSchemaOnce(): Promise<void> {
+  if (!schemaPromise) {
+    schemaPromise = ensureSchema().catch(err => {
+      // Reset on failure so the next call retries — better than wedging the
+      // route in a permanently-broken state on a transient DB hiccup.
+      schemaPromise = null
+      throw err
+    })
+  }
+  return schemaPromise
 }
 
 export async function ensureSchema(): Promise<void> {
@@ -170,21 +210,25 @@ export async function getPoolParamEvents(
   chain: string,
   poolAddress: string
 ): Promise<PoolParamEventRow[]> {
-  const rows = await sql`
-    SELECT
-      chain,
-      pool_address,
-      protocol_version,
-      block_number,
-      block_timestamp,
-      log_index,
-      tx_hash,
-      event_name,
-      args
-    FROM pool_param_events
-    WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
-    ORDER BY block_number ASC, log_index ASC
-  `
+  const rows = await trackDbOp(
+    'read',
+    'getPoolParamEvents',
+    () => sql`
+      SELECT
+        chain,
+        pool_address,
+        protocol_version,
+        block_number,
+        block_timestamp,
+        log_index,
+        tx_hash,
+        event_name,
+        args
+      FROM pool_param_events
+      WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+      ORDER BY block_number ASC, log_index ASC
+    `
+  )
   return (rows as Record<string, unknown>[]).map(r => ({
     chain: r.chain as string,
     poolAddress: r.pool_address as string,
@@ -210,11 +254,15 @@ export async function countPoolParamEvents(
   chain: string,
   poolAddress: string
 ): Promise<number> {
-  const rows = await sql`
-    SELECT count(*)::int AS n
-    FROM pool_param_events
-    WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
-  `
+  const rows = await trackDbOp(
+    'read',
+    'countPoolParamEvents',
+    () => sql`
+      SELECT count(*)::int AS n
+      FROM pool_param_events
+      WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+    `
+  )
   return Number((rows as Record<string, unknown>[])[0]?.n ?? 0)
 }
 
@@ -246,7 +294,9 @@ export async function insertPoolParamEvents(
       ON CONFLICT (chain, pool_address, block_number, log_index) DO NOTHING
     `
   )
-  await sql.transaction(statements)
+  await trackDbOp('write', `insertPoolParamEvents[n=${rows.length}]`, () =>
+    sql.transaction(statements)
+  )
 }
 
 // ── pool_sync_state helpers ────────────────────────────────────────────────
@@ -265,12 +315,16 @@ export async function getPoolSyncState(
   chain: string,
   poolAddress: string
 ): Promise<PoolSyncState | null> {
-  const rows = await sql`
-    SELECT chain, pool_address, last_block, last_synced_at, deep_synced
-    FROM pool_sync_state
-    WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
-    LIMIT 1
-  `
+  const rows = await trackDbOp(
+    'read',
+    'getPoolSyncState',
+    () => sql`
+      SELECT chain, pool_address, last_block, last_synced_at, deep_synced
+      FROM pool_sync_state
+      WHERE chain = ${chain} AND pool_address = ${poolAddress.toLowerCase()}
+      LIMIT 1
+    `
+  )
   const r = (rows as Record<string, unknown>[])[0]
   if (!r) return null
   return {
@@ -294,12 +348,16 @@ export async function upsertPoolSyncState(
   lastBlock: number,
   markDeepSynced = false
 ): Promise<void> {
-  await sql`
-    INSERT INTO pool_sync_state (chain, pool_address, last_block, last_synced_at, deep_synced)
-    VALUES (${chain}, ${poolAddress.toLowerCase()}, ${lastBlock}, now(), ${markDeepSynced})
-    ON CONFLICT (chain, pool_address) DO UPDATE
-      SET last_block = EXCLUDED.last_block,
-          last_synced_at = now(),
-          deep_synced = pool_sync_state.deep_synced OR EXCLUDED.deep_synced
-  `
+  await trackDbOp(
+    'write',
+    'upsertPoolSyncState',
+    () => sql`
+      INSERT INTO pool_sync_state (chain, pool_address, last_block, last_synced_at, deep_synced)
+      VALUES (${chain}, ${poolAddress.toLowerCase()}, ${lastBlock}, now(), ${markDeepSynced})
+      ON CONFLICT (chain, pool_address) DO UPDATE
+        SET last_block = EXCLUDED.last_block,
+            last_synced_at = now(),
+            deep_synced = pool_sync_state.deep_synced OR EXCLUDED.deep_synced
+    `
+  )
 }

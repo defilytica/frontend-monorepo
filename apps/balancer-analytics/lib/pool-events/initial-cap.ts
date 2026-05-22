@@ -40,6 +40,7 @@ const SECONDS_PER_BLOCK: Record<GqlChain, number> = {
 }
 
 export const NINETY_DAYS_SECONDS = 90 * 24 * 60 * 60
+export const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60
 
 /**
  * Return the `fromBlock` for a 90-day cold-start scan, given the current head.
@@ -49,5 +50,19 @@ export const NINETY_DAYS_SECONDS = 90 * 24 * 60 * 60
 export function ninetyDayFromBlock(chain: GqlChain, head: bigint): bigint {
   const spb = SECONDS_PER_BLOCK[chain] ?? 12
   const blocks = BigInt(Math.ceil(NINETY_DAYS_SECONDS / spb))
+  return head > blocks ? head - blocks : 0n
+}
+
+/**
+ * Return the `fromBlock` for a 30-day cold-start scan. Used for V2 pools,
+ * where dynamic-fee Filter B events (`SwapFeePercentageChanged`,
+ * `AmpUpdateStarted`, etc.) can fire dozens or hundreds of times per pool
+ * over a quarter — the 90-day window would write hundreds of rows for
+ * little additional signal. 30 days plus the 100-event hard cap in
+ * `sync.ts` bounds V2 DB writes by an order of magnitude.
+ */
+export function thirtyDayFromBlock(chain: GqlChain, head: bigint): bigint {
+  const spb = SECONDS_PER_BLOCK[chain] ?? 12
+  const blocks = BigInt(Math.ceil(THIRTY_DAYS_SECONDS / spb))
   return head > blocks ? head - blocks : 0n
 }
