@@ -42,12 +42,12 @@ export function scrubError(err: unknown): Record<string, unknown> {
   }
   return {
     name: e?.name,
-    shortMessage: e?.shortMessage,
+    shortMessage: e?.shortMessage ? scrubSecret(e.shortMessage) : undefined,
     message: e?.message ? scrubSecret(e.message) : undefined,
     details: e?.details ? scrubSecret(e.details) : undefined,
     url: e?.url ? scrubSecret(e.url) : undefined,
     status: e?.status,
-    body: e?.body,
+    body: e?.body !== undefined ? scrubSecret(e.body) : undefined,
     causeName: e?.cause?.name,
     causeMessage: e?.cause?.message ? scrubSecret(e.cause.message) : undefined,
   }
