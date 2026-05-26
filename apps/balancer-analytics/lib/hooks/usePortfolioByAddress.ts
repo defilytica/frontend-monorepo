@@ -141,23 +141,6 @@ function bucketize(type: string | null | undefined, title: string | undefined): 
   return 'other'
 }
 
-function sourceFor(type: string | null | undefined): RewardEstimate['source'] {
-  if (!type) return 'other'
-  if (type === GqlPoolAprItemType.Aura) return 'aura'
-  if (type === GqlPoolAprItemType.MabeetsEmissions) return 'mabeets'
-  if (type === GqlPoolAprItemType.Merkl) return 'merkl'
-  if (type === GqlPoolAprItemType.Fuul) return 'fuul'
-  if (type === GqlPoolAprItemType.Voting) return 'voting'
-  if (
-    type === GqlPoolAprItemType.Staking ||
-    type === GqlPoolAprItemType.StakingBoost ||
-    type === GqlPoolAprItemType.VebalEmissions
-  ) {
-    return 'gauge'
-  }
-  return 'other'
-}
-
 /**
  * Read the user's effective position USD from the API's `userBalance` block.
  * api-v3 already aggregates wallet + staked across staking variants, so we
@@ -246,12 +229,10 @@ function buildPosition(pool: PortfolioPool): PortfolioPosition | null {
 function aggregate(positions: PortfolioPosition[], protocolTvl: number): {
   tokens: TokenAggregate[]
   chains: ChainAggregate[]
-  rewards: RewardAggregate[]
   summary: PortfolioSummary
 } {
   const tokenMap = new Map<string, TokenAggregate>()
   const chainMap = new Map<GqlChain, ChainAggregate>()
-  const rewardMap = new Map<string, RewardAggregate>()
 
   let totalUsd = 0
   let walletUsd = 0
