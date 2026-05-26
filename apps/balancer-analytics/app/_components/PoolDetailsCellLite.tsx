@@ -10,7 +10,7 @@ import { ProtocolIcon } from '@repo/lib/shared/components/icons/ProtocolIcon'
 import { Protocol } from '@repo/lib/modules/protocols/useProtocols'
 import { TooltipWithTouch } from '@repo/lib/shared/components/tooltips/TooltipWithTouch'
 import { isBoosted, isGyro, isQuantAmmPool } from '@repo/lib/modules/pool/pool.helpers'
-import type { EnrichedPool } from '@analytics/lib/hooks/usePoolExplorer'
+import type { EnrichedPool, ExplorerPool } from '@analytics/lib/hooks/usePoolExplorer'
 
 const HOOK_LABEL: Record<string, string> = {
   STABLE_SURGE: 'StableSurge',
@@ -38,11 +38,17 @@ function formatHookLabel(type: string | null): string {
   )
 }
 
+// Accepts either the explorer's `EnrichedPool` (carries `_hookType`) or any
+// `GetPoolsQuery['pools'][number]` shape directly. The portfolio table
+// reuses this cell against raw query rows, which don't go through `enrich()`.
+type PoolDetailsInput = (ExplorerPool | EnrichedPool) & { _hookType?: string | null }
+
 // Mirrors `PoolListTableDetailsCell` in `@repo/lib`: version tag · type label ·
 // boosted/gyro/quantamm icons · hook chip. Uses `PoolHookTag` would need
 // HooksProvider, so we render a lightweight hook chip from `pool.hook.type`.
-export function PoolDetailsCellLite({ pool }: { pool: EnrichedPool }) {
-  const hookLabel = formatHookLabel(pool._hookType)
+export function PoolDetailsCellLite({ pool }: { pool: PoolDetailsInput }) {
+  const hookType = pool._hookType ?? pool.hook?.type ?? null
+  const hookLabel = formatHookLabel(hookType)
   const showGyro = isGyro(pool.type)
   const showQuant = isQuantAmmPool(pool.type)
   const showBoosted = isBoosted(pool)
@@ -89,7 +95,7 @@ export function PoolDetailsCellLite({ pool }: { pool: EnrichedPool }) {
           )}
         </HStack>
       )}
-      {pool._hookType && (
+      {hookType && (
         <>
           <Text color="border.base" fontSize="0.5rem">
             •

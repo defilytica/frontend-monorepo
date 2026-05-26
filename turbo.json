@@ -30,7 +30,8 @@
     "SLACK_BOT_TOKEN",
     "DATABASE_URL",
     "POSTGRES_URL",
-    "CRON_SECRET"
+    "CRON_SECRET",
+    "MAINNET_RPC_URL"
   ],
   "globalPassThroughEnv": ["SENTRY_AUTH_TOKEN"],
   "tasks": {

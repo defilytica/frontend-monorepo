@@ -119,7 +119,7 @@ const METRICS: MetricDef[] = [
   { key: 'VOLUME', label: 'Volume', group: 'Activity', unit: 'USD', headline: 'Swap volume · 24h', color: '#EA9A43' },
   { key: 'FEES', label: 'Swap fees', group: 'Revenue', unit: 'USD', headline: 'Swap fees · 24h', color: '#56c596' },
   { key: 'YIELD', label: 'Yield', group: 'Revenue', unit: 'USD', headline: 'Yield captured · 24h', color: '#b3aef5' },
-  { key: 'SURPLUS', label: 'Surplus', group: 'Revenue', unit: 'USD', headline: 'Surplus · 24h', color: '#9f95f0' },
+  { key: 'SURPLUS', label: 'CoW surplus', group: 'Revenue', unit: 'USD', headline: 'CoW AMM surplus · 24h', color: '#9f95f0' },
   { key: 'LPS', label: 'LPs', group: 'Participation', unit: 'COUNT', headline: 'Liquidity providers', color: '#25e2a4' },
   { key: 'POOLS', label: 'Pools', group: 'Participation', unit: 'COUNT', headline: 'Active pools', color: '#E6C6A0' },
 ]
@@ -694,37 +694,58 @@ function RangeRow({
 
 function MetricTabs({ metric, onChange }: { metric: MetricKey; onChange: (m: MetricKey) => void }) {
   return (
-    <HStack
-      alignSelf="flex-start"
-      bg="background.level0"
-      border="1px solid"
-      borderColor="border.subduedZen"
-      borderRadius="full"
-      flexWrap="wrap"
-      maxW="full"
-      p="3px"
-      spacing="2px"
-      w="fit-content"
-    >
-      {METRICS.map(m => (
-        <Box
-          _hover={{ color: 'font.maxContrast' }}
-          as="button"
-          bg={metric === m.key ? 'background.level3' : 'transparent'}
-          borderRadius="full"
-          color={metric === m.key ? 'font.maxContrast' : 'font.secondary'}
-          fontSize="xs"
-          fontWeight="medium"
-          key={m.key}
-          onClick={() => onChange(m.key)}
-          px="ms"
-          py="xs"
-          transition="all 0.15s"
-        >
-          {m.label}
-        </Box>
-      ))}
-    </HStack>
+    <VStack align="flex-start" spacing="xs">
+      <Text color="font.secondary" fontSize="2xs" fontWeight="medium" letterSpacing="0.4px" textTransform="uppercase">
+        Switch metric
+      </Text>
+      <HStack
+        alignSelf="flex-start"
+        bg="background.level0"
+        border="1px solid"
+        borderColor="border.subduedZen"
+        borderRadius="full"
+        flexWrap="wrap"
+        maxW="full"
+        p="3px"
+        role="tablist"
+        spacing="2px"
+        w="fit-content"
+      >
+        {METRICS.map(m => {
+          const isActive = metric === m.key
+          return (
+            <Box
+              _hover={
+                isActive
+                  ? undefined
+                  : {
+                      color: 'font.maxContrast',
+                      bg: 'background.level2',
+                    }
+              }
+              aria-selected={isActive}
+              as="button"
+              bg={isActive ? 'background.level3' : 'transparent'}
+              boxShadow={isActive ? 'sm' : 'none'}
+              color={isActive ? 'font.maxContrast' : 'font.secondary'}
+              cursor="pointer"
+              fontSize="xs"
+              fontWeight={isActive ? 'bold' : 'medium'}
+              key={m.key}
+              onClick={() => onChange(m.key)}
+              px="ms"
+              py="xs"
+              role="tab"
+              rounded="full"
+              transition="all 0.15s"
+              type="button"
+            >
+              {m.label}
+            </Box>
+          )
+        })}
+      </HStack>
+    </VStack>
   )
 }
 
@@ -744,24 +765,42 @@ function SegBtns<T extends string>({
       borderColor="border.subduedZen"
       borderRadius="full"
       p="3px"
+      role="tablist"
       spacing={0}
     >
-      {options.map(o => (
-        <Box
-          as="button"
-          bg={value === o ? 'background.level3' : 'transparent'}
-          borderRadius="full"
-          color={value === o ? 'font.maxContrast' : 'font.secondary'}
-          fontSize="xs"
-          fontWeight="medium"
-          key={o}
-          onClick={() => onChange(o)}
-          px="ms"
-          py="xs"
-        >
-          {o}
-        </Box>
-      ))}
+      {options.map(o => {
+        const isActive = value === o
+        return (
+          <Box
+            _hover={
+              isActive
+                ? undefined
+                : {
+                    color: 'font.maxContrast',
+                    bg: 'background.level2',
+                  }
+            }
+            aria-selected={isActive}
+            as="button"
+            bg={isActive ? 'background.level3' : 'transparent'}
+            boxShadow={isActive ? 'sm' : 'none'}
+            color={isActive ? 'font.maxContrast' : 'font.secondary'}
+            cursor="pointer"
+            fontSize="xs"
+            fontWeight={isActive ? 'bold' : 'medium'}
+            key={o}
+            onClick={() => onChange(o)}
+            px="ms"
+            py="xs"
+            role="tab"
+            rounded="full"
+            transition="all 0.15s"
+            type="button"
+          >
+            {o}
+          </Box>
+        )
+      })}
     </HStack>
   )
 }

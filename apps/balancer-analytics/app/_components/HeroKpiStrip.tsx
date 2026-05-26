@@ -47,10 +47,11 @@ export function HeroKpiStrip() {
       <KpiCard
         delta={sparks.surplus.delta24h}
         isLoading={loading}
-        label="Surplus · 24h"
+        label="CoW AMM surplus · 24h"
         spark={sparks.surplus.values}
         sparkColor="purple.400"
         textured
+        tooltip="Trader surplus captured by Balancer's CoW AMM pools (MEV-protected, batch-settled). CoW AMM-specific — does not apply to v2 or v3 pools."
         value={usd(Number(d?.surplus24h ?? 0))}
       />
     </SimpleGrid>
