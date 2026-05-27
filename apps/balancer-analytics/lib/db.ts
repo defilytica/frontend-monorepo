@@ -2,9 +2,10 @@
  * Postgres client + schema bootstrap for the protocol snapshotter.
  *
  * Backed by Vercel's Neon Postgres integration — the marketplace add-on
- * injects `DATABASE_URL` (and `POSTGRES_URL` as an alias) at runtime. The
- * `@neondatabase/serverless` driver gives us a tagged-template `sql` helper
- * for typed queries plus `sql.transaction([...])` for batched writes.
+ * injects `DATABASE_URL` / `POSTGRES_URL` at runtime. When the integration
+ * is mounted under a custom prefix (e.g. "DATABASE"), the vars come through
+ * prefixed (`DATABASE_POSTGRES_URL`); we accept both shapes here so the
+ * deploy works regardless of which way the Vercel project is wired up.
  *
  * Rows are keyed by `(ts, chain, protocol)`:
  *   - `chain = 'ALL'` for the cross-chain aggregate, otherwise a `GqlChain`.
@@ -20,10 +21,19 @@
 import 'server-only'
 import { neon } from '@neondatabase/serverless'
 
-const dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL
+// Try each naming convention the Vercel Neon Marketplace add-on can emit,
+// in priority order. `DATABASE_URL` / `POSTGRES_URL` are the bare defaults;
+// the `DATABASE_`-prefixed variants come from a project that mounted the
+// integration under a "DATABASE" prefix.
+const dbUrl =
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.DATABASE_POSTGRES_URL ||
+  process.env.DATABASE_POSTGRES_URL_NON_POOLING ||
+  process.env.DATABASE_URL_UNPOOLED
 if (!dbUrl) {
   throw new Error(
-    'DATABASE_URL (or POSTGRES_URL) is missing. Provision Neon via the Vercel Marketplace and the env var is injected automatically.'
+    'No Postgres connection string found. Set DATABASE_URL / POSTGRES_URL, or wire the Vercel Neon Marketplace integration (which also provides DATABASE_POSTGRES_URL).'
   )
 }
 

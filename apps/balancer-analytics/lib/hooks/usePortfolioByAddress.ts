@@ -290,17 +290,6 @@ function aggregate(positions: PortfolioPosition[], protocolTvl: number): {
       })
       tokenMap.set(key, existing)
     }
-
-    for (const reward of pos.rewards) {
-      const key = `${reward.tokenAddress?.toLowerCase() ?? reward.tokenSymbol.toLowerCase()}`
-      const existing = rewardMap.get(key) ?? {
-        tokenAddress: reward.tokenAddress,
-        tokenSymbol: reward.tokenSymbol,
-        dailyUsd: 0,
-      }
-      existing.dailyUsd += reward.dailyUsd
-      rewardMap.set(key, existing)
-    }
   }
 
   const dailyEarningsUsd = dailyFeesUsd + dailyYieldUsd + dailyRewardsUsd
@@ -310,7 +299,6 @@ function aggregate(positions: PortfolioPosition[], protocolTvl: number): {
   return {
     tokens: Array.from(tokenMap.values()).sort((a, b) => b.valueUsd - a.valueUsd),
     chains: Array.from(chainMap.values()).sort((a, b) => b.positionUsd - a.positionUsd),
-    rewards: Array.from(rewardMap.values()).sort((a, b) => b.dailyUsd - a.dailyUsd),
     summary: {
       positionsCount: positions.length,
       totalUsd,
@@ -373,7 +361,6 @@ export function usePortfolioByAddress(rawAddress: string | null): UsePortfolioBy
         positions: [],
         tokens: [],
         chains: [],
-        rewards: [],
         summary: { ...EMPTY_SUMMARY, protocolTvl },
       }
     }
@@ -391,7 +378,6 @@ export function usePortfolioByAddress(rawAddress: string | null): UsePortfolioBy
     positions: derived.positions,
     tokens: derived.tokens,
     chains: derived.chains,
-    rewards: derived.rewards,
     summary: derived.summary,
   }
 }
