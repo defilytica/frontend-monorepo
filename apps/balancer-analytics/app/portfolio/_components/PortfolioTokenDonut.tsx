@@ -28,18 +28,46 @@ const usd = (n: number) =>
 
 const TOP_N = 8
 
+type Slice = { key: string; name: string; value: number }
+
+// Human-readable chain suffix, used only when we need to disambiguate two
+// same-symbol entries (USDp on Mainnet vs Avalanche). Plain `chain` enums
+// like HYPEREVM render badly title-cased, so this is just a quick helper.
+function shortChain(chain: string): string {
+  return chain.charAt(0) + chain.slice(1).toLowerCase()
+}
+
 export function PortfolioTokenDonut({ tokens }: { tokens: TokenAggregate[] }) {
   // Collapse the long tail into a single "Other" slice so the donut stays
-  // legible even for wallets with 30+ underlying token exposures.
-  const slices = useMemo(() => {
-    if (tokens.length <= TOP_N) return tokens.map(t => ({ name: t.symbol, value: t.valueUsd }))
-    const head = tokens.slice(0, TOP_N).map(t => ({ name: t.symbol, value: t.valueUsd }))
+  // legible even for wallets with 30+ underlying token exposures. Each
+  // slice carries a unique `key` (chain:address) for React + a possibly-
+  // disambiguated `name` for echarts; symbols that repeat across chains
+  // get a `(Chain)` suffix so the legend reads unambiguously.
+  const slices = useMemo<Slice[]>(() => {
+    const head = tokens.slice(0, TOP_N)
     const tail = tokens.slice(TOP_N)
+
+    // Count symbol occurrences in the visible head so we only suffix when
+    // there's an actual collision.
+    const symbolCounts = new Map<string, number>()
+    for (const t of head) {
+      symbolCounts.set(t.symbol, (symbolCounts.get(t.symbol) ?? 0) + 1)
+    }
+
+    const out: Slice[] = head.map(t => ({
+      key: `${t.chain}:${t.address.toLowerCase()}`,
+      name:
+        (symbolCounts.get(t.symbol) ?? 0) > 1
+          ? `${t.symbol} (${shortChain(t.chain)})`
+          : t.symbol,
+      value: t.valueUsd,
+    }))
+
     const tailValue = tail.reduce((acc, t) => acc + t.valueUsd, 0)
     if (tailValue > 0) {
-      head.push({ name: `Other (${tail.length})`, value: tailValue })
+      out.push({ key: '__other__', name: `Other (${tail.length})`, value: tailValue })
     }
-    return head
+    return out
   }, [tokens])
 
   const total = slices.reduce((a, b) => a + b.value, 0)
@@ -114,7 +142,7 @@ export function PortfolioTokenDonut({ tokens }: { tokens: TokenAggregate[] }) {
           </Box>
           <VStack align="stretch" flex={1} minW={0} spacing="xs">
             {slices.slice(0, 7).map((s, i) => (
-              <Flex align="center" gap="sm" key={s.name}>
+              <Flex align="center" gap="sm" key={s.key}>
                 <Box
                   bg={PALETTE[i % PALETTE.length]}
                   borderRadius="2px"

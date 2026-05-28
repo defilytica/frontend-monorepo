@@ -32,7 +32,7 @@ const tokens = (n: number) =>
     maximumFractionDigits: 4,
   }).format(n)
 
-const MERKL_URL = 'https://app.merkl.xyz/'
+const MERKL_USER_URL_BASE = 'https://app.merkl.xyz/users'
 const BALANCER_PORTFOLIO_URL = 'https://balancer.fi/portfolio'
 
 type Row = {
@@ -80,8 +80,8 @@ export function PortfolioMerklCard({ address }: { address: string }) {
   const loading = merkl.loading || gauge.loading
   const hasMerkl = merklRows.length > 0
   const hasGauge = gaugeRows.length > 0
-  // Stable deep link for the user — Merkl filters its rewards UI by `user`.
-  const merklUserUrl = `${MERKL_URL}?user=${address}`
+  // Stable deep link to the user's Merkl rewards page.
+  const merklUserUrl = `${MERKL_USER_URL_BASE}/${address}`
 
   return (
     <Card h="full" variant="level1">
@@ -118,14 +118,7 @@ export function PortfolioMerklCard({ address }: { address: string }) {
             <Text color="font.secondary" fontSize="xs">
               Total unclaimed
             </Text>
-            <Text
-              color="font.maxContrast"
-              fontSize="2xl"
-              fontWeight="bold"
-              letterSpacing="-0.4px"
-            >
-              {totalUsd > 0 ? usd(totalUsd) : '—'}
-            </Text>
+            <TotalUnclaimedHeadline rowCount={allRows.length} totalUsd={totalUsd} />
             <SourceBreakdown
               gaugeUsd={gauge.payload?.totalUnclaimedUsd ?? 0}
               hasGauge={hasGauge}
@@ -197,6 +190,34 @@ function OpenBalancerButton({ variant }: { variant: 'primary' | 'tertiary' }) {
         Claim on Balancer
       </Button>
     </TooltipWithTouch>
+  )
+}
+
+function TotalUnclaimedHeadline({
+  totalUsd,
+  rowCount,
+}: {
+  totalUsd: number
+  rowCount: number
+}) {
+  // Rewards exist but none of them carry a USD price (api-v3 / Merkl
+  // hasn't priced them yet, or freshly-launched tokens). Showing "—" here
+  // would contradict the row list below — instead surface the count so
+  // the user knows there's *something* to claim.
+  if (totalUsd <= 0) {
+    return (
+      <Text color="font.maxContrast" fontSize="lg" fontWeight="bold" letterSpacing="-0.4px">
+        {rowCount} reward {rowCount === 1 ? 'token' : 'tokens'}
+        <Text as="span" color="font.secondary" fontSize="xs" fontWeight="normal" ml="xs">
+          (value unpriced)
+        </Text>
+      </Text>
+    )
+  }
+  return (
+    <Text color="font.maxContrast" fontSize="2xl" fontWeight="bold" letterSpacing="-0.4px">
+      {usd(totalUsd)}
+    </Text>
   )
 }
 

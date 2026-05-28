@@ -49,6 +49,9 @@ export type PortfolioPosition = {
 
 export type TokenAggregate = {
   address: string
+  /** Chain the token lives on. Required for unique identity — the same
+   *  symbol (USDC, USDp, etc.) exists on multiple chains. */
+  chain: GqlChain
   symbol: string
   logoURI: string | null
   /** USD value attributable to this token across all positions. */
@@ -274,6 +277,7 @@ function aggregate(positions: PortfolioPosition[], protocolTvl: number): {
       const key = `${pos.chain}:${t.address.toLowerCase()}`
       const existing = tokenMap.get(key) ?? {
         address: t.address,
+        chain: pos.chain,
         symbol: t.symbol,
         logoURI: t.logoURI ?? null,
         valueUsd: 0,
