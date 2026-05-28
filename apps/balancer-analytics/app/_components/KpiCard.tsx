@@ -1,6 +1,8 @@
 'use client'
 
-import { Box, Card, Flex, Skeleton, Text, VStack } from '@chakra-ui/react'
+import { Box, Card, Flex, Icon, Skeleton, Text, VStack } from '@chakra-ui/react'
+import { HelpCircle } from 'react-feather'
+import { TooltipWithTouch } from '@repo/lib/shared/components/tooltips/TooltipWithTouch'
 import { Sparkline } from './Sparkline'
 import { DeltaPill } from './DeltaPill'
 
@@ -18,6 +20,8 @@ type Props = {
    *  Off by default so existing call sites (pool detail snapshots) stay
    *  visually unchanged. */
   textured?: boolean
+  /** Optional help-tooltip rendered next to the label as a small (?) icon. */
+  tooltip?: string
 }
 
 export function KpiCard({
@@ -30,6 +34,7 @@ export function KpiCard({
   big,
   isLoading,
   textured,
+  tooltip,
 }: Props) {
   return (
     <Card
@@ -53,15 +58,28 @@ export function KpiCard({
       ) : null}
       <VStack align="stretch" h="full" justify="space-between" position="relative" spacing="md">
         <Flex align="center" gap="sm" justify="space-between">
-          <Text
-            color="font.secondary"
-            fontSize="xs"
-            fontWeight="medium"
-            letterSpacing="0.4px"
-            textTransform="uppercase"
-          >
-            {label}
-          </Text>
+          <Flex align="center" gap="xs" minW={0}>
+            <Text
+              color="font.secondary"
+              fontSize="xs"
+              fontWeight="medium"
+              letterSpacing="0.4px"
+              textTransform="uppercase"
+            >
+              {label}
+            </Text>
+            {tooltip && (
+              <TooltipWithTouch label={tooltip} placement="top">
+                <Icon
+                  aria-label="More info"
+                  as={HelpCircle}
+                  boxSize="12px"
+                  color="font.secondary"
+                  cursor="help"
+                />
+              </TooltipWithTouch>
+            )}
+          </Flex>
           {delta != null && <DeltaPill value={delta} />}
         </Flex>
 

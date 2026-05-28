@@ -7,10 +7,12 @@ import {
   Grid,
   GridItem,
   Heading,
+  Icon,
   Stack,
   Text,
   VStack,
 } from '@chakra-ui/react'
+import { ChevronRight } from 'react-feather'
 import Link from 'next/link'
 import { useCallback, useMemo } from 'react'
 import {
@@ -211,7 +213,7 @@ export function PoolExplorer() {
             <Heading size="h5">Pool monitor</Heading>
             <Text color="font.secondary" fontSize="xs">
               {filteredCount.toLocaleString()} of {totalCount.toLocaleString()} pools matching
-              filters
+              filters · click a row to open pool details
             </Text>
           </VStack>
           <Stack align="stretch" direction="column" minW="120px" spacing="xs">
@@ -388,17 +390,36 @@ function TableRow({ pool, index }: { pool: EnrichedPool; index: number }) {
 
   return (
     <Box
-      _hover={{ bg: 'background.level0' }}
+      _hover={{
+        bg: 'background.level0',
+        // Inset box-shadow stands in for a left accent bar so we don't push
+        // the rest of the row 2px to the right on hover (which would jitter
+        // the entire pool list).
+        boxShadow: 'inset 2px 0 0 0 var(--chakra-colors-font-highlight)',
+      }}
       borderBottom={index === 0 ? undefined : '1px solid'}
       borderColor="border.base"
-      transition="background 0.15s"
+      sx={{
+        '&:hover .pool-row-chevron': {
+          opacity: 1,
+          transform: 'translateX(2px)',
+        },
+      }}
+      transition="background 0.15s, box-shadow 0.15s"
       w="full"
     >
-      <Link href={getPoolHref(pool)} prefetch={false} role="group">
+      <Link
+        aria-label={`View pool details for ${pool.poolTokens?.map(t => t.symbol).filter(Boolean).join(' / ') || pool.id}`}
+        href={getPoolHref(pool)}
+        prefetch={false}
+        role="group"
+        style={{ cursor: 'pointer', display: 'block' }}
+      >
         <Grid
           alignItems="center"
           gap={{ base: 'sm', lg: 'ms' }}
           gridTemplateColumns={RESPONSIVE_COLS}
+          position="relative"
           px={{ base: 'md', lg: 'ms' }}
           py="ms"
           w="full"
@@ -437,9 +458,23 @@ function TableRow({ pool, index }: { pool: EnrichedPool; index: number }) {
             </Text>
           </GridItem>
           <GridItem justifySelf="end">
-            <Text fontWeight="medium" textAlign="right">
-              {pct(pool._totalApr)}
-            </Text>
+            <Flex align="center" gap="xs">
+              <Text fontWeight="medium" textAlign="right">
+                {pct(pool._totalApr)}
+              </Text>
+              {/* Trailing chevron — sits in the existing APR cell so the grid
+                  template doesn't have to grow. Subtle by default, brighter
+                  and nudged right on hover so the row reads as a link. */}
+              <Icon
+                aria-hidden
+                as={ChevronRight}
+                boxSize={4}
+                className="pool-row-chevron"
+                color="font.secondary"
+                opacity={{ base: 0.4, md: 0.25 }}
+                transition="opacity 0.15s, transform 0.15s"
+              />
+            </Flex>
           </GridItem>
           <GridItem
             display={{ base: 'block', lg: 'none', '2xl': 'block' }}
