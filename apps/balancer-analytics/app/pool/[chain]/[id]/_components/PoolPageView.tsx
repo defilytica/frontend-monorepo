@@ -30,6 +30,7 @@ import { PoolEventLog } from './PoolEventLog'
 import { HistoryRangeToggle, type HistoryRange } from './HistoryRangeToggle'
 import { CompareModeToolbar } from './CompareModeToolbar'
 import { PoolSnapshotTile } from './PoolSnapshotTile'
+import { PoolOrderFlow } from './PoolOrderFlow/PoolOrderFlow'
 import { PoolTokenPillsLite } from '@analytics/app/_components/PoolTokenPillsLite'
 
 function shortAddr(addr: string): string {
@@ -339,6 +340,16 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
             </Card>
           </Stack>
         </FadeInOnView>
+
+        {/* Order flow — Sankey of swap source → token in → token out. Skipped
+            for CowAmm pools where flow is trivially 100% CowSwap. */}
+        {poolDetail.type !== 'COW_AMM' && (
+          <PoolOrderFlow
+            chain={poolDetail.chain}
+            poolId={poolDetail.id}
+            poolTokens={poolDetail.tokens}
+          />
+        )}
 
         {/* Current state — full-width card below the chart. */}
         <FadeInOnView animateOnce={false}>

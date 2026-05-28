@@ -614,6 +614,10 @@ export function PoolStatePanel({
   // reCLAMM) so the card grid stays compact and each action sits next
   // to the values it changes.
   const opsNetwork = poolDetail.chain.toLowerCase()
+  // All four payload builders below now accept `?network=&pool=` query
+  // params to preload the target pool. Keep this consistent across every
+  // ManageButton so users land on the correct pool's form, not an empty one.
+  const opsQuery = `?network=${opsNetwork}&pool=${poolDetail.address}`
   const feeSetterButton = (
     <ManageButton
       link={
@@ -621,12 +625,12 @@ export function PoolStatePanel({
           ? {
               label: 'Set static swap fee',
               hint: 'V3 fee-setter payload builder',
-              href: `${OPS_BASE}/payload-builder/fee-setter-v3`,
+              href: `${OPS_BASE}/payload-builder/fee-setter-v3${opsQuery}`,
             }
           : {
               label: 'Set static swap fee',
               hint: 'V2 fee-setter payload builder',
-              href: `${OPS_BASE}/payload-builder/fee-setter`,
+              href: `${OPS_BASE}/payload-builder/fee-setter${opsQuery}`,
             }
       }
     />
@@ -636,7 +640,7 @@ export function PoolStatePanel({
       link={{
         label: 'Tune StableSurge thresholds',
         hint: 'Surge hook payload builder',
-        href: `${OPS_BASE}/hooks/stable-surge?network=${opsNetwork}&pool=${poolDetail.address}`,
+        href: `${OPS_BASE}/hooks/stable-surge${opsQuery}`,
       }}
     />
   ) : null
@@ -645,21 +649,18 @@ export function PoolStatePanel({
       link={{
         label: 'Manage reCLAMM',
         hint: 'reCLAMM payload builder',
-        href: `${OPS_BASE}/payload-builder/reclamm?network=${opsNetwork}&pool=${poolDetail.address}`,
+        href: `${OPS_BASE}/payload-builder/reclamm${opsQuery}`,
       }}
     />
   ) : null
-  // Amp-factor update is V3 STABLE-only. Static link for now — the ops
-  // builder doesn't yet take query params to preload the pool's current
-  // amp / ramp config, so we can't deep-link the pool in (unlike the surge
-  // and reCLAMM builders above).
+  // Amp-factor update is V3 STABLE-only.
   const ampUpdateButton =
     isV3 && s ? (
       <ManageButton
         link={{
           label: 'Update amp factor',
           hint: 'V3 amplification-factor update payload builder',
-          href: `${OPS_BASE}/payload-builder/amp-factor-update-v3`,
+          href: `${OPS_BASE}/payload-builder/amp-factor-update-v3${opsQuery}`,
         }}
       />
     ) : null
