@@ -4,27 +4,35 @@ import { SimpleGrid } from '@chakra-ui/react'
 import { KpiCard } from '../../_components/KpiCard'
 import { usd } from '../../_components/format'
 import { useMerklRewards } from '@analytics/lib/hooks/useMerklRewards'
-import type { PortfolioSummary } from '@analytics/lib/hooks/usePortfolioByAddress'
+import type {
+  PortfolioSummary,
+  TokenAggregate,
+} from '@analytics/lib/hooks/usePortfolioByAddress'
 
 const pct = (n: number, digits = 2) => `${(n * 100).toFixed(digits)}%`
 
 export function PortfolioKpiStrip({
   summary,
+  tokens,
   address,
 }: {
   summary: PortfolioSummary
+  tokens: TokenAggregate[]
   address: string
 }) {
-  // Format share-of-TVL with a sensible precision: most wallets are well
-  // under 0.1% so showing 4 digits keeps the number meaningful instead of
-  // rounding everyone down to "0.00%".
-  const shareLabel = formatShare(summary.shareOfProtocolTvl)
   // BAL emissions stopped and Aura is decommissioned, so the headline daily
   // earnings number is now fees + IB yield only. Reward APR items still get
   // shown per-position in the table for the rare pools that carry them.
   const dailyFlow = summary.dailyFeesUsd + summary.dailyYieldUsd
   const flowApr = summary.totalUsd > 0 ? (dailyFlow * 365) / summary.totalUsd : 0
   const dailyPct = summary.totalUsd > 0 ? dailyFlow / summary.totalUsd : 0
+
+  // Top token across the whole portfolio — surfaces the wallet's largest
+  // single-asset exposure at a glance ("this fund is mostly WETH"). Tokens
+  // is pre-sorted by valueUsd desc in usePortfolioByAddress.
+  const topToken = tokens[0]
+  const topShare = topToken && summary.totalUsd > 0 ? topToken.valueUsd / summary.totalUsd : 0
+  const tokenCount = tokens.length
 
   const merkl = useMerklRewards(address)
   const merklTotal = merkl.payload?.totalUnclaimedUsd ?? 0
@@ -41,15 +49,15 @@ export function PortfolioKpiStrip({
         value={usd(summary.totalUsd)}
       />
       <KpiCard
-        label="Share of Balancer TVL"
+        label="Top token exposure"
         sub={
-          summary.protocolTvl > 0
-            ? `${usd(summary.totalUsd)} of ${usd(summary.protocolTvl)}`
-            : 'Protocol TVL unavailable'
+          topToken
+            ? `${formatUsd(topToken.valueUsd)} · ${tokenCount} token${tokenCount === 1 ? '' : 's'} total`
+            : 'No token exposure'
         }
         textured
-        tooltip="Position value as a fraction of total Balancer TVL across all supported chains."
-        value={shareLabel}
+        tooltip="Largest single-token exposure across all positions, computed by multiplying each pool's token composition by the user's share of the pool. The % shows how concentrated the portfolio is in that one asset."
+        value={topToken ? `${topToken.symbol} ${pct(topShare)}` : '—'}
       />
       <KpiCard
         label="Est. daily yield"
@@ -60,27 +68,20 @@ export function PortfolioKpiStrip({
       />
       <KpiCard
         isLoading={merkl.loading}
-        label="Merkl unclaimed"
+        label="Unclaimed incentives"
         sub={
           merklCount > 0
             ? merklTokens
               ? `${merklCount} token${merklCount === 1 ? '' : 's'} · ${merklTokens}${merklCount > 3 ? '…' : ''}`
               : `${merklCount} token${merklCount === 1 ? '' : 's'}`
-            : 'No active reward campaigns'
+            : 'No active campaigns'
         }
         textured
-        tooltip="Unclaimed Merkl rewards across Balancer-supported chains. Includes amounts already vested but not yet claimed; pending (still vesting) amounts are listed in the Merkl card below."
+        tooltip="Unclaimed reward tokens across Balancer-supported chains. Currently sources from Merkl campaigns; gauge claimables are listed in the Incentive Rewards card below."
         value={merklTotal > 0 ? usd(merklTotal) : '—'}
       />
     </SimpleGrid>
   )
-}
-
-function formatShare(share: number): string {
-  if (!Number.isFinite(share) || share <= 0) return '—'
-  if (share >= 0.01) return `${(share * 100).toFixed(2)}%`
-  if (share >= 0.0001) return `${(share * 100).toFixed(4)}%`
-  return '< 0.0001%'
 }
 
 function formatUsd(n: number): string {

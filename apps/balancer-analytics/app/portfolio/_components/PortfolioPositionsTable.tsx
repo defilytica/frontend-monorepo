@@ -28,6 +28,12 @@ import { TooltipWithTouch } from '@repo/lib/shared/components/tooltips/TooltipWi
 import { PoolTokenPillsLite } from '../../_components/PoolTokenPillsLite'
 import { PoolDetailsCellLite } from '../../_components/PoolDetailsCellLite'
 import type { PortfolioPosition } from '@analytics/lib/hooks/usePortfolioByAddress'
+// The P&L route + usePortfolioPnl hook are intentionally retained in the
+// codebase: the cost-basis + IL math works but needs more polish (rate-
+// providing tokens, FIFO lot tracking) before we re-expose it. To bring
+// the column back, restore the import below plus the corresponding header
+// / cell / sort branch.
+// import { usePortfolioPnl, type PnlResult } from '@analytics/lib/hooks/usePortfolioPnl'
 
 const usd = (n: number, abbrev = true) =>
   new Intl.NumberFormat('en-US', {
@@ -38,6 +44,15 @@ const usd = (n: number, abbrev = true) =>
   }).format(n || 0)
 
 const pct = (n: number, digits = 2) => `${(n * 100).toFixed(digits)}%`
+
+// Pool share format: always 2 decimals, but tiny shares (< 0.01%) get a
+// readable floor instead of rounding to "0.00%" which reads as a bug.
+const poolSharePct = (n: number): string => {
+  const v = (n ?? 0) * 100
+  if (!Number.isFinite(v) || v <= 0) return '0%'
+  if (v < 0.01) return '< 0.01%'
+  return `${v.toFixed(2)}%`
+}
 
 // Mirror PoolExplorer's grid template so the two tables read consistently.
 // chain · pool · details · position USD · APR · est daily · staking
@@ -158,11 +173,7 @@ export function PortfolioPositionsTable({ positions }: { positions: PortfolioPos
           variant="subSection"
         >
           <Box minW={{ base: '960px', lg: 'auto' }} w="full">
-            <TableHeader
-              handleSort={handleSort}
-              sortDir={sortDir}
-              sortKey={sortKey}
-            />
+            <TableHeader handleSort={handleSort} sortDir={sortDir} sortKey={sortKey} />
             {sorted.length === 0 ? (
               <Box p="md">
                 <Text color="font.secondary" fontSize="sm">
@@ -349,7 +360,7 @@ function TableRow({ position, index }: { position: PortfolioPosition; index: num
                 {usd(position.positionUsd)}
               </Text>
               <Text color="font.tertiary" fontSize="2xs">
-                {pct(position.shareOfPool, 4)} of pool
+                {poolSharePct(position.shareOfPool)} of pool
               </Text>
             </VStack>
           </GridItem>

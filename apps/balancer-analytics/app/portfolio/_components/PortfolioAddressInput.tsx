@@ -17,7 +17,7 @@ import { Search } from 'react-feather'
 import { useEnsResolution } from '@analytics/lib/hooks/useEnsResolution'
 
 const EXAMPLES = [
-  { label: 'Balancer treasury', address: '0x10A19e7eE7d7F8a52822f6817de8ea18204F2e4f' },
+  { label: 'Balancer Innovation fund', address: '0x284a37B375e69c8cB30a5633Ee55f3584dd26808' },
   { label: 'vitalik.eth', address: 'vitalik.eth' },
 ]
 
@@ -54,11 +54,11 @@ export function PortfolioAddressInput({ initialValue = '' }: { initialValue?: st
           <Text color="font.maxContrast" fontSize="sm" fontWeight="bold" mb="xs">
             Wallet address or ENS name
           </Text>
-          <HStack align="flex-start" spacing="sm">
-            <InputGroup size="lg">
+          <HStack align="center" spacing="sm">
+            <InputGroup size="md">
               <InputLeftElement pointerEvents="none">
                 <Box color="font.secondary">
-                  <Search size={16} />
+                  <Search size={14} />
                 </Box>
               </InputLeftElement>
               <Input
@@ -75,7 +75,8 @@ export function PortfolioAddressInput({ initialValue = '' }: { initialValue?: st
             <Button
               isDisabled={!isReady}
               isLoading={resolution.status === 'loading'}
-              size="lg"
+              minW="80px"
+              size="md"
               type="submit"
               variant="primary"
             >

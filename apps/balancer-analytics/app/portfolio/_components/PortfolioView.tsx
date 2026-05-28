@@ -56,7 +56,11 @@ export function PortfolioView({ address }: { address: string }) {
   return (
     <VStack align="stretch" spacing="lg">
       <FadeInOnView animateOnce={false}>
-        <PortfolioKpiStrip address={address} summary={portfolio.summary} />
+        <PortfolioKpiStrip
+          address={address}
+          summary={portfolio.summary}
+          tokens={portfolio.tokens}
+        />
       </FadeInOnView>
 
       <FadeInOnView animateOnce={false}>
