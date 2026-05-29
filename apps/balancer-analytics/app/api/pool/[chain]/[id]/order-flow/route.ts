@@ -138,6 +138,32 @@ type RawSwap = {
   tokenOut?: { address: string; amount: string } | null
 }
 
+/** Upstream failure flavor — drives both the HTTP status the route returns
+ *  and the user-facing error string the client UI renders. Rate limits get
+ *  their own bucket because the right user action is "wait and retry", not
+ *  "report a bug" — and that needs to be visible in the chart's empty state
+ *  rather than buried in a generic 502 message. */
+type UpstreamErrorKind = 'rate_limit' | 'upstream_5xx' | 'network' | 'graphql'
+
+class UpstreamError extends Error {
+  readonly kind: UpstreamErrorKind
+  readonly status: number | null
+  constructor(kind: UpstreamErrorKind, message: string, status: number | null = null) {
+    super(message)
+    this.name = 'UpstreamError'
+    this.kind = kind
+    this.status = status
+  }
+}
+
+/** Per-IP rate-limit signal from api-v3 / its CDN. 429 is the canonical one;
+ *  503 and 504 are commonly returned by upstream proxies during throttling
+ *  bursts too. Treating all three as "rate limited" matches what the user
+ *  actually experiences ("the API is refusing my requests, I should wait"). */
+function isRateLimitStatus(status: number): boolean {
+  return status === 429 || status === 503 || status === 504
+}
+
 async function fetchSwaps(
   poolId: string,
   chain: GqlChain,
@@ -169,7 +195,10 @@ async function fetchSwaps(
       // 502. After at least one page, prefer a partial result to a hard
       // failure.
       if (swaps.length === 0) {
-        throw new Error(`api-v3 fetch failed: ${err instanceof Error ? err.message : String(err)}`)
+        throw new UpstreamError(
+          'network',
+          `api-v3 fetch failed: ${err instanceof Error ? err.message : String(err)}`
+        )
       }
       console.warn('[order-flow] api-v3 mid-pagination network error — returning partial')
       truncated = true
@@ -178,10 +207,14 @@ async function fetchSwaps(
 
     if (!res.ok) {
       if (swaps.length === 0) {
-        // Most useful failure modes (HTTP 429 rate limit, 5xx upstream) get
-        // surfaced as a 502 from the route; the message in the catch block
-        // tells you which one.
-        throw new Error(`api-v3 HTTP ${res.status} (skip=${skip})`)
+        const kind: UpstreamErrorKind = isRateLimitStatus(res.status)
+          ? 'rate_limit'
+          : 'upstream_5xx'
+        throw new UpstreamError(
+          kind,
+          `api-v3 HTTP ${res.status} (skip=${skip})`,
+          res.status
+        )
       }
       console.warn(
         `[order-flow] api-v3 HTTP ${res.status} at skip=${skip} — returning partial`
@@ -193,7 +226,7 @@ async function fetchSwaps(
     const json = (await res.json()) as { data?: { poolEvents?: RawSwap[] }; errors?: unknown }
     if (json.errors) {
       if (swaps.length === 0) {
-        throw new Error(`api-v3 errors: ${JSON.stringify(json.errors)}`)
+        throw new UpstreamError('graphql', `api-v3 errors: ${JSON.stringify(json.errors)}`)
       }
       console.warn('[order-flow] api-v3 GraphQL errors mid-pagination — returning partial')
       truncated = true
@@ -398,18 +431,45 @@ export async function GET(_request: Request, ctx: RouteContext): Promise<Respons
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    console.error('[order-flow] failed', { chain, id: poolId, message })
+    const kind: UpstreamErrorKind | 'internal' =
+      err instanceof UpstreamError ? err.kind : 'internal'
+    console.error('[order-flow] failed', { chain, id: poolId, kind, message })
+
+    // Map each upstream-failure flavor to (status, error code). The client
+    // reads `error` to pick a friendly message; matching the upstream's HTTP
+    // semantics where possible (429 for rate limit) also helps CDNs and any
+    // future browser-side retry logic behave sensibly.
+    const isRateLimit = kind === 'rate_limit'
+    const status = isRateLimit ? 429 : 502
+    const errorCode = isRateLimit
+      ? 'rate_limited'
+      : kind === 'network'
+        ? 'upstream_unreachable'
+        : kind === 'graphql'
+          ? 'upstream_graphql_error'
+          : kind === 'upstream_5xx'
+            ? 'upstream_error'
+            : 'internal_error'
+
     // In dev, include the actual upstream error in the response body so a
     // failure can be diagnosed without opening the dev server log. In prod
     // we keep the generic message — these errors can include URLs or other
     // diagnostic noise we don't want to leak.
-    const body =
-      process.env.NODE_ENV === 'production'
-        ? { error: 'order flow fetch failed' }
-        : { error: 'order flow fetch failed', detail: message }
-    return Response.json(body, {
-      status: 502,
-      headers: { 'Cache-Control': 'no-store' },
-    })
+    const body: Record<string, unknown> = { error: errorCode }
+    if (isRateLimit) {
+      // Reading the upstream's Retry-After would be ideal; api-v3 doesn't
+      // expose it in dev tests but the structure is here for future use.
+      body.message =
+        'Balancer API rate limit reached. Please wait a minute and try again.'
+    }
+    if (process.env.NODE_ENV !== 'production') body.detail = message
+
+    const headers: Record<string, string> = { 'Cache-Control': 'no-store' }
+    // Retry-After hints both browsers and any caller doing exponential backoff
+    // that this isn't a hard failure — wait and try again. 60s is generous;
+    // most per-IP buckets refill in <30s.
+    if (isRateLimit) headers['Retry-After'] = '60'
+
+    return Response.json(body, { status, headers })
   }
 }

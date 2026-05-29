@@ -23,6 +23,7 @@ import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
 import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
 import { NetworkIcon } from '@repo/lib/shared/components/icons/NetworkIcon'
 import { chainToSlugMap } from '@repo/lib/modules/pool/pool.utils'
+import { usePoolEvents } from '@analytics/lib/hooks/usePoolEvents'
 import type { PoolPageData } from '../page'
 import { PoolHistoryChart } from './PoolHistoryChart'
 import { PoolStatePanel } from './PoolStatePanel'
@@ -85,7 +86,16 @@ function RangeChangeOverlay({
 }
 
 export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Element {
-  const { poolDetail, snapshots, events, state, range } = data
+  const { poolDetail, snapshots, state, range, fullHistory } = data
+  // Events stream in client-side instead of blocking the server render.
+  // The page used to wait on a multi-second drpc log walk before painting
+  // anything; we now show the shell immediately and let the timeline
+  // (chart markers + event log) populate when it lands. `data.events`
+  // remains in the payload type as an empty array for backwards
+  // compatibility, but `events` from the hook is the source of truth.
+  const eventsResult = usePoolEvents(poolDetail.chain, poolDetail.id, { fullHistory })
+  const events = eventsResult.events
+  const eventsLoading = eventsResult.loading
 
   // Next's App Router scroll-to-top on navigation is unreliable when the
   // route has a `loading.tsx` Suspense boundary — landing on a pool page
@@ -315,10 +325,18 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
                   >
                     <VStack align="flex-start" spacing="xs">
                       <Heading size="h5">{RANGE_LABEL[range]}</Heading>
-                      <Text color="font.secondary" fontSize="xs">
-                        {events.length.toLocaleString()} parameter event
-                        {events.length === 1 ? '' : 's'} indexed · {RANGE_SUBTITLE[range]}
-                      </Text>
+                      <Flex align="center" gap="xs">
+                        <Text color="font.secondary" fontSize="xs">
+                          {eventsLoading && events.length === 0
+                            ? 'Indexing parameter events…'
+                            : `${events.length.toLocaleString()} parameter event${events.length === 1 ? '' : 's'} indexed`}
+                          {' · '}
+                          {RANGE_SUBTITLE[range]}
+                        </Text>
+                        {eventsLoading && (
+                          <Spinner color="font.secondary" size="xs" thickness="2px" />
+                        )}
+                      </Flex>
                     </VStack>
                     <HistoryRangeToggle
                       onSelect={handleRangeSelect}
@@ -348,6 +366,7 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
             chain={poolDetail.chain}
             poolId={poolDetail.id}
             poolTokens={poolDetail.tokens}
+            poolTvlUsd={snapshots[snapshots.length - 1]?.totalLiquidity ?? 0}
           />
         )}
 
@@ -369,7 +388,7 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
         )}
 
         <FadeInOnView animateOnce={false}>
-          <PoolEventLog chain={poolDetail.chain} events={events} />
+          <PoolEventLog chain={poolDetail.chain} events={events} loading={eventsLoading} />
         </FadeInOnView>
       </VStack>
     </DefaultPageContainer>

@@ -218,7 +218,16 @@ export function PoolOrderFlowSankey({ graph, tokenMap, periodVolumeUsd, onSelect
           emphasis: { focus: 'adjacency' },
           nodeWidth: 12,
           nodeGap: 8,
-          layoutIterations: 32,
+          // Disable layout relaxation so node y-positions follow the order
+          // of `data` exactly. With relaxation on, ECharts re-derives y from
+          // link weights, which means the same source can land at a
+          // different position when the user switches 30d → 7d (the weights
+          // change). `buildSankeyGraph` already emits nodes in a stable
+          // range-invariant order (legend rank for sources, address for
+          // tokens), so trusting that order keeps the chart visually
+          // anchored across range toggles.
+          layoutIterations: 0,
+          nodeAlign: 'justify',
           orient: 'horizontal',
           draggable: false,
           label: {

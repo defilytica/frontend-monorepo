@@ -128,6 +128,17 @@ const ALL_CATEGORIES: readonly SourceCategory[] = [
   'unknown',
 ]
 
+/** Stable ordering used for source-node y-position in the Sankey.
+ *  Matches the legend order so categories read top-to-bottom in the same
+ *  sequence as the legend chips. Index lookup is O(1) via this map. */
+const CATEGORY_RANK: Record<SourceCategory, number> = ALL_CATEGORIES.reduce(
+  (acc, cat, i) => {
+    acc[cat] = i
+    return acc
+  },
+  {} as Record<SourceCategory, number>
+)
+
 function emptyCategoryShare(): Record<SourceCategory, { usd: number; pct: number }> {
   const out = {} as Record<SourceCategory, { usd: number; pct: number }>
   for (const c of ALL_CATEGORIES) out[c] = { usd: 0, pct: 0 }
@@ -301,8 +312,28 @@ export function buildSankeyGraph(
   }
 
   // ── Emit nodes ─────────────────────────────────────────────────────────
+  // Sort each column by a range-invariant key so the same node lands at the
+  // same y-position regardless of which time window is active. Without this,
+  // switching 30d → 7d reshuffles columns because the iteration order of
+  // the underlying Maps follows the order swaps were processed.
+  //
+  // Source column: category rank first (matches the legend's top-to-bottom
+  // order), then synthetic "Other" sinks to the bottom of its category, then
+  // alphabetical id as the final tiebreaker. The synthetic per-sender
+  // `unknown:<addr>` ids sort by address — deterministic across ranges.
+  //
+  // Token columns: by address. Token symbols are not used because two pools
+  // can share a symbol, and we want one stable key.
   const nodes: SankeyNode[] = []
-  for (const { source, usd, count } of sourceAgg.values()) {
+  const sortedSources = [...sourceAgg.values()].sort((a, b) => {
+    const rankDiff = CATEGORY_RANK[a.source.category] - CATEGORY_RANK[b.source.category]
+    if (rankDiff !== 0) return rankDiff
+    const aOther = a.source.id === 'other' ? 1 : 0
+    const bOther = b.source.id === 'other' ? 1 : 0
+    if (aOther !== bOther) return aOther - bOther
+    return a.source.id.localeCompare(b.source.id)
+  })
+  for (const { source, usd, count } of sortedSources) {
     nodes.push({
       name: sourceNodeName(source.id),
       depth: 0,
@@ -313,7 +344,8 @@ export function buildSankeyGraph(
       swapCount: count,
     })
   }
-  for (const [addr, { usd, count }] of tokenInAgg) {
+  const sortedTokenIn = [...tokenInAgg.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  for (const [addr, { usd, count }] of sortedTokenIn) {
     nodes.push({
       name: tokenInNodeName(addr),
       depth: 1,
@@ -324,7 +356,8 @@ export function buildSankeyGraph(
       swapCount: count,
     })
   }
-  for (const [addr, { usd, count }] of tokenOutAgg) {
+  const sortedTokenOut = [...tokenOutAgg.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  for (const [addr, { usd, count }] of sortedTokenOut) {
     nodes.push({
       name: tokenOutNodeName(addr),
       depth: 2,

@@ -408,9 +408,15 @@ function EventRow({
 export function PoolEventLog({
   events,
   chain,
+  loading = false,
 }: {
   events: PoolParamEvent[]
   chain: GqlChain
+  /** True while the parent's `usePoolEvents` hook is still resolving. We
+   *  forward it to the PaginatedTable so first-paint shows skeleton rows
+   *  instead of the "no events" empty state, which would be misleading
+   *  during the streaming window. */
+  loading?: boolean
 }): React.JSX.Element {
   const explorerBase = EXPLORER_URL[chain] ?? ''
 
@@ -492,9 +498,11 @@ export function PoolEventLog({
           <VStack align="flex-start" spacing="xs">
             <Heading size="h5">Parameter events</Heading>
             <Text color="font.secondary" fontSize="xs">
-              {filtered.length === sorted.length
-                ? `${sorted.length.toLocaleString()} event${sorted.length === 1 ? '' : 's'}`
-                : `${filtered.length.toLocaleString()} of ${sorted.length.toLocaleString()} events`}
+              {loading && sorted.length === 0
+                ? 'Indexing parameter events…'
+                : filtered.length === sorted.length
+                  ? `${sorted.length.toLocaleString()} event${sorted.length === 1 ? '' : 's'}`
+                  : `${filtered.length.toLocaleString()} of ${sorted.length.toLocaleString()} events`}
             </Text>
           </VStack>
         </Flex>
@@ -532,7 +540,7 @@ export function PoolEventLog({
             <PaginatedTable<PoolParamEvent>
               getRowId={ev => `${ev.txHash}-${ev.logIndex}`}
               items={pageItems}
-              loading={false}
+              loading={loading && sorted.length === 0}
               loadingLength={pageSize}
               loadingSpinnerPosition="top"
               noItemsFoundLabel={

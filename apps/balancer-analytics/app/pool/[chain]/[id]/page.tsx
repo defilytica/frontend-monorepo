@@ -10,9 +10,14 @@
  * Data flow:
  *   - api-v3 `poolGetPool`           — pool metadata for the header
  *   - api-v3 `poolGetSnapshots(90d)` — continuous metric series
- *   - `syncPoolEvents`                — drpc-derived event timeline
  *   - `readUniversalV3State` + `readStableTypeState` — current params via
  *     VaultExplorer + pool getters multicall
+ *
+ * The drpc-derived event timeline (`syncPoolEvents`) used to be fetched
+ * here too, but it's the page's slow path (multi-second log walk on cold
+ * pools) and was blocking the entire render. It now streams in via the
+ * client-side `usePoolEvents` hook (lib/hooks/usePoolEvents.ts) which hits
+ * `/api/pool/[chain]/[id]/events` after the shell paints.
  *
  * Functions are called server-side directly (no HTTP roundtrip through
  * the /api routes) — the routes exist as a public surface for external
@@ -25,7 +30,7 @@ import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import { PROJECT_CONFIG } from '@repo/lib/config/getProjectConfig'
 import { ChainSlug, getChainSlug } from '@repo/lib/modules/pool/pool.utils'
 import { isDrpcSupportedChain } from '@analytics/lib/contracts/drpc-endpoints'
-import { syncPoolEvents } from '@analytics/lib/pool-events/sync'
+import { UpstreamError, gqlFetch as gqlFetchUpstream } from '@analytics/lib/upstream/gql'
 import {
   readGyroEclpTypeState,
   readLbpTypeState,
@@ -50,6 +55,7 @@ import {
 import type { PoolParamEvent } from '@analytics/lib/pool-events/types'
 import { scrubError } from '@analytics/lib/drpc/scrub'
 import { PoolPageView } from './_components/PoolPageView'
+import { PoolPageUpstreamNotice } from './_components/PoolPageUpstreamNotice'
 
 export const dynamic = 'force-dynamic'
 
@@ -177,42 +183,22 @@ function logRpcError(label: string, chain: GqlChain, pool: string, err: unknown)
  *  `cache: 'no-store'`, preserving the documented bypass path. */
 const POOL_FETCH_REVALIDATE_SECONDS = 60
 
+/** Thin wrapper around the shared `gqlFetch` so the existing call sites
+ *  keep their (query, variables, label, options) signature. Rate-limit
+ *  detection, GraphQL error handling, and the typed `UpstreamError`
+ *  throw all live in `lib/upstream/gql.ts` now and are shared with the
+ *  other api-v3 callers in the app. */
 async function gqlFetch<T>(
   query: string,
   variables: Record<string, unknown>,
   label: string,
   options: { forceFresh?: boolean } = {}
 ): Promise<T | null> {
-  const cacheOptions: RequestInit = options.forceFresh
-    ? { cache: 'no-store' }
-    : { next: { revalidate: POOL_FETCH_REVALIDATE_SECONDS } }
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-    ...cacheOptions,
+  return gqlFetchUpstream<T>(API_URL, query, variables, {
+    upstream: 'api-v3',
+    label,
+    cache: options.forceFresh ? 'no-store' : { revalidate: POOL_FETCH_REVALIDATE_SECONDS },
   })
-  // Loud about failure modes so a "404: api-v3 has no pool" doesn't hide
-  // (a) Cloudflare rate-limits (429) under heavy dev traffic, or
-  // (b) GraphQL schema drift (e.g. api-v3 removing `addressIn`).
-  // Silent `null` here used to look identical to a legitimate "not found"
-  // in the dev log; that ambiguity bit us on a re-tested pool today.
-  if (!res.ok) {
-    console.warn(`[pool/page] api-v3 ${label} HTTP ${res.status}`, {
-      variables,
-      retryAfter: res.headers.get('retry-after'),
-    })
-    return null
-  }
-  const json = (await res.json()) as { data?: T; errors?: unknown }
-  if (json.errors) {
-    console.warn(`[pool/page] api-v3 ${label} GraphQL errors`, {
-      variables,
-      errors: json.errors,
-    })
-    return null
-  }
-  return json.data ?? null
 }
 
 export default async function Page({
@@ -309,7 +295,12 @@ export default async function Page({
   // user typing the wrong form sees it in the dev log.
   const apiV3Id = rawId
 
-  const detailRes = await gqlFetch<{
+  // Wrap the api-v3 fetches so an upstream failure (rate limit, 5xx,
+  // GraphQL error) renders a transparent notice instead of the misleading
+  // "page not found" the old `gqlFetch returns null → notFound()` flow
+  // produced. A genuine "this pool doesn't exist" still falls through to
+  // the `!detailRes?.poolGetPool` branch below as before.
+  type DetailRes = {
     poolGetPool: {
       id: string
       address: string
@@ -331,30 +322,39 @@ export default async function Page({
         logoURI: string | null
       }[]
     }
-  }>(POOL_DETAIL_QUERY, { id: apiV3Id, chain }, 'poolGetPool', { forceFresh: forceRefresh })
+  }
+  type SnapshotsRes = { snapshots: PoolSnapshot[] }
 
-  // Snapshots and sync can run concurrently now that we know the canonical
-  // identifiers — separate Promise.all once `apiV3Id` is resolved.
-  const [snapshotsRes, syncRes] = await Promise.all([
-    gqlFetch<{ snapshots: PoolSnapshot[] }>(
-      SNAPSHOTS_QUERY,
-      { id: apiV3Id, chain, range: SNAPSHOT_RANGE[range] },
-      'poolGetSnapshots',
-      { forceFresh: forceRefresh }
-    ),
-    syncPoolEvents(chain, contractAddress, {
-      force: forceRefresh,
-      fullHistory,
-      // V2 pools need the 66-char poolId for `poolGetPool` to resolve;
-      // the contract address would 404 and poison the watermark.
-      apiV3Id: apiV3Id,
-    }).catch(
-      (err: unknown) => {
-        logRpcError('[pool/page] syncPoolEvents failed', chain, contractAddress, err)
-        return { events: [], lastBlock: 0, cached: false, poolType: null, protocolVersion: null }
-      }
-    ),
-  ])
+  // Pool detail + snapshots are fast (api-v3 only, ~200–500ms each). They're
+  // all the data the page needs to render the header, snapshot tile, and
+  // chart shell. The previously-blocking `syncPoolEvents` call — a drpc log
+  // walk that can run 10–20s on cold pools — has been moved to a client-
+  // side hook (`usePoolEvents`) that streams the event timeline in after
+  // the shell paints. The page now feels instant on first visit even when
+  // the indexer hasn't seen the pool before.
+  let detailRes: DetailRes | null
+  let snapshotsRes: SnapshotsRes | null
+  try {
+    ;[detailRes, snapshotsRes] = await Promise.all([
+      gqlFetch<DetailRes>(
+        POOL_DETAIL_QUERY,
+        { id: apiV3Id, chain },
+        'poolGetPool',
+        { forceFresh: forceRefresh }
+      ),
+      gqlFetch<SnapshotsRes>(
+        SNAPSHOTS_QUERY,
+        { id: apiV3Id, chain, range: SNAPSHOT_RANGE[range] },
+        'poolGetSnapshots',
+        { forceFresh: forceRefresh }
+      ),
+    ])
+  } catch (err) {
+    if (err instanceof UpstreamError) {
+      return <PoolPageUpstreamNotice chainSlug={chainSlug} error={err} poolId={id} />
+    }
+    throw err
+  }
 
   if (!detailRes?.poolGetPool) {
     console.warn('[pool/page] 404: api-v3 has no pool for input id', {
@@ -469,8 +469,13 @@ export default async function Page({
   const data: PoolPageData = {
     poolDetail,
     snapshots: trimmedSnapshots,
-    events: syncRes.events,
-    lastBlock: syncRes.lastBlock,
+    // Events are no longer fetched on the page's critical path — they
+    // stream in via `usePoolEvents` on the client. The page-level value
+    // stays as an empty array so the existing components don't have to
+    // handle a separate "events are loading" prop; the hook surfaces the
+    // loading state directly to the chart's indexing chip.
+    events: [],
+    lastBlock: 0,
     range,
     fullHistory,
     state: {

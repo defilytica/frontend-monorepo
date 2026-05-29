@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import type { GovernancePayload, GovernanceProposal } from '@analytics/lib/governance/types'
+import { fetchWithRetry } from '@analytics/lib/upstream/fetch-retry'
 
 export type { GovernanceProposal }
 
@@ -30,7 +31,8 @@ export function useGovernance() {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/governance')
+    const controller = new AbortController()
+    fetchWithRetry('/api/governance', { signal: controller.signal })
       .then(r => {
         if (!r.ok) throw new Error(`governance HTTP ${r.status}`)
         return r.json() as Promise<GovernancePayload>
@@ -47,6 +49,7 @@ export function useGovernance() {
       })
       .catch(error => {
         if (cancelled) return
+        if (error instanceof Error && error.name === 'AbortError') return
         setState({
           items: [],
           loading: false,
@@ -57,6 +60,7 @@ export function useGovernance() {
       })
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
 
