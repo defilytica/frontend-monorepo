@@ -29,4 +29,20 @@ export default [
       ],
     },
   },
+  {
+    // Standalone Node scripts (probe-swap-sources.mjs, future maintenance
+    // tools). Not part of the Next.js build — runs under plain `node`, so
+    // the globals it relies on are Node's, not the browser's.
+    files: ['scripts/**/*.{js,mjs}'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+      },
+    },
+  },
 ]

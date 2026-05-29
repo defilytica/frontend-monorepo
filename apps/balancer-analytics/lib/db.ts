@@ -200,6 +200,48 @@ export async function ensureSchema(): Promise<void> {
   // normal warm path instead of re-walking the whole chain every time.
   // Idempotent ALTER so existing deploys migrate in place.
   await sql`ALTER TABLE pool_sync_state ADD COLUMN IF NOT EXISTS deep_synced BOOLEAN NOT NULL DEFAULT false`
+
+  // ── Per-tx `tx.to` cache (used by PoolOrderFlow) ──
+  // api-v3 returns `tx.from` (an EOA) in the swap event's `sender` field —
+  // not the immediate Vault caller. To label by the actual entry contract
+  // (1inch Router, CoW Settlement, Balancer Router, named MEV bot, etc.),
+  // we fetch each swap tx's `to` field from drpc and cache it here.
+  // Rows are written lazily — top-N highest-USD uncached txs per request.
+  // `to_address` is nullable for contract-creation txs (where tx.to is null),
+  // but in practice swap txs always have a `to`. Keyed by `(chain, tx_hash)`.
+  await sql`
+    CREATE TABLE IF NOT EXISTS swap_tx_metadata (
+      chain       TEXT         NOT NULL,
+      tx_hash     TEXT         NOT NULL,
+      to_address  TEXT,
+      fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+      PRIMARY KEY (chain, tx_hash)
+    )
+  `
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_swap_tx_metadata_to
+    ON swap_tx_metadata (chain, to_address)
+    WHERE to_address IS NOT NULL
+  `
+
+  // ── Dune-sourced address label dictionary ──
+  // Bulk-fetched periodically from Dune query 3004790 (~7k rows across all
+  // chains). Lives alongside the manually-curated `labels/direct.ts` dict
+  // and feeds the order-flow label cascade as a second tier (manual wins).
+  // Categorization is inferred client-side from the `name` field since the
+  // Dune query only exposes (address, name, blockchain).
+  await sql`
+    CREATE TABLE IF NOT EXISTS dune_address_labels (
+      chain      TEXT         NOT NULL,
+      address    TEXT         NOT NULL,
+      source_id  TEXT         NOT NULL,
+      name       TEXT         NOT NULL,
+      category   TEXT         NOT NULL,
+      fetched_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+      PRIMARY KEY (chain, address)
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_dune_labels_category ON dune_address_labels (chain, category)`
 }
 
 // ── pool_param_events helpers ──────────────────────────────────────────────
@@ -370,4 +412,164 @@ export async function upsertPoolSyncState(
             deep_synced = pool_sync_state.deep_synced OR EXCLUDED.deep_synced
     `
   )
+}
+
+// ── swap_tx_metadata helpers ───────────────────────────────────────────────
+
+/** Bulk-read tx.to for a set of tx hashes. Returns a map keyed by lowercased
+ *  tx hash. Hashes that have never been enriched are simply absent — callers
+ *  treat absence as "schedule for enrichment". */
+export async function getSwapTxMetadata(
+  chain: string,
+  txHashes: readonly string[]
+): Promise<Map<string, string | null>> {
+  if (txHashes.length === 0) return new Map()
+  const normalized = txHashes.map(h => h.toLowerCase())
+  const rows = await trackDbOp(
+    'read',
+    `getSwapTxMetadata[n=${normalized.length}]`,
+    () => sql`
+      SELECT tx_hash, to_address
+      FROM swap_tx_metadata
+      WHERE chain = ${chain} AND tx_hash = ANY(${normalized})
+    `
+  )
+  const out = new Map<string, string | null>()
+  for (const r of rows as Record<string, unknown>[]) {
+    out.set(r.tx_hash as string, (r.to_address as string | null) ?? null)
+  }
+  return out
+}
+
+export type SwapTxMetadataInsert = {
+  txHash: string
+  toAddress: string | null
+}
+
+export async function upsertSwapTxMetadata(
+  chain: string,
+  rows: readonly SwapTxMetadataInsert[]
+): Promise<void> {
+  if (rows.length === 0) return
+  const statements = rows.map(
+    r => sql`
+      INSERT INTO swap_tx_metadata (chain, tx_hash, to_address, fetched_at)
+      VALUES (
+        ${chain},
+        ${r.txHash.toLowerCase()},
+        ${r.toAddress ? r.toAddress.toLowerCase() : null},
+        now()
+      )
+      ON CONFLICT (chain, tx_hash) DO UPDATE
+        SET to_address = EXCLUDED.to_address,
+            fetched_at = now()
+    `
+  )
+  await trackDbOp('write', `upsertSwapTxMetadata[n=${rows.length}]`, () =>
+    sql.transaction(statements)
+  )
+}
+
+// ── dune_address_labels helpers ────────────────────────────────────────────
+
+export type DuneLabel = {
+  sourceId: string
+  name: string
+  category: string
+}
+
+/** Bulk-read Dune labels for a set of addresses. Returned map keys are
+ *  lowercased addresses. Used by the order-flow route to feed the
+ *  cascade's Dune tier. */
+export async function getDuneLabels(
+  chain: string,
+  addresses: readonly string[]
+): Promise<Map<string, DuneLabel>> {
+  if (addresses.length === 0) return new Map()
+  const normalized = addresses.map(a => a.toLowerCase())
+  const rows = await trackDbOp(
+    'read',
+    `getDuneLabels[n=${normalized.length}]`,
+    () => sql`
+      SELECT address, source_id, name, category
+      FROM dune_address_labels
+      WHERE chain = ${chain} AND address = ANY(${normalized})
+    `
+  )
+  const out = new Map<string, DuneLabel>()
+  for (const r of rows as Record<string, unknown>[]) {
+    out.set(r.address as string, {
+      sourceId: r.source_id as string,
+      name: r.name as string,
+      category: r.category as string,
+    })
+  }
+  return out
+}
+
+export type DuneLabelInsert = {
+  chain: string
+  address: string
+  sourceId: string
+  name: string
+  category: string
+}
+
+/** Bulk-upsert Dune labels. Each row is keyed by (chain, address) — re-running
+ *  the sync against the same Dune snapshot is idempotent. Batched in
+ *  ~500-row chunks because Neon's HTTP driver has a parameter cap. */
+export async function upsertDuneLabels(
+  rows: readonly DuneLabelInsert[]
+): Promise<{ written: number }> {
+  if (rows.length === 0) return { written: 0 }
+  const CHUNK = 500
+  let written = 0
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK)
+    const statements = chunk.map(
+      r => sql`
+        INSERT INTO dune_address_labels (chain, address, source_id, name, category, fetched_at)
+        VALUES (
+          ${r.chain},
+          ${r.address.toLowerCase()},
+          ${r.sourceId},
+          ${r.name},
+          ${r.category},
+          now()
+        )
+        ON CONFLICT (chain, address) DO UPDATE
+          SET source_id = EXCLUDED.source_id,
+              name = EXCLUDED.name,
+              category = EXCLUDED.category,
+              fetched_at = now()
+      `
+    )
+    await trackDbOp('write', `upsertDuneLabels[chunk=${chunk.length}]`, () =>
+      sql.transaction(statements)
+    )
+    written += chunk.length
+  }
+  return { written }
+}
+
+/** Total count + per-category breakdown. Used by the cron route to log
+ *  a one-line summary so we can verify a sync landed correctly. */
+export async function getDuneLabelStats(): Promise<{
+  total: number
+  byChain: Record<string, number>
+  byCategory: Record<string, number>
+}> {
+  const rows = await trackDbOp('read', 'getDuneLabelStats', () => sql`
+    SELECT chain, category, count(*)::int AS n FROM dune_address_labels GROUP BY chain, category
+  `)
+  const stats = { total: 0, byChain: {} as Record<string, number>, byCategory: {} as Record<string, number> }
+  for (const r of rows as Record<string, unknown>[]) {
+    const chain = r.chain as string
+    const category = r.category as string
+    const n = Number(r.n)
+    stats.total += n
+    stats.byChain[chain] = (stats.byChain[chain] ?? 0) + n
+    stats.byCategory[category] = (stats.byCategory[category] ?? 0) + n
+  }
+  return stats
 }

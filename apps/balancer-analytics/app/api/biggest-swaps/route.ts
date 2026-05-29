@@ -19,6 +19,11 @@ import 'server-only'
 import { unstable_cache } from 'next/cache'
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import { PROJECT_CONFIG } from '@repo/lib/config/getProjectConfig'
+import {
+  UpstreamError,
+  gqlFetch,
+  upstreamErrorToResponse,
+} from '@analytics/lib/upstream/gql'
 import type { BiggestSwap, BiggestSwapsPayload } from '@analytics/lib/biggest-swaps/types'
 
 export const runtime = 'nodejs'
@@ -88,22 +93,16 @@ const TOP_N = 10
 const FETCH_LIMIT = 300
 
 async function fetchSwaps(): Promise<RawEvent[]> {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      query: QUERY,
-      variables: { first: FETCH_LIMIT, chains: PROJECT_CONFIG.supportedNetworks },
-    }),
-    // Rely on Next.js' route-segment cache (`revalidate = 300`) rather than
-    // fetch's own cache — the latter is keyed on URL+body and would silently
-    // share state across deployments / preview branches.
-    cache: 'no-store',
-  })
-  if (!res.ok) throw new Error(`api-v3 HTTP ${res.status}`)
-  const json = (await res.json()) as { data?: { poolEvents: RawEvent[] }; errors?: unknown }
-  if (json.errors) throw new Error(`api-v3 errors: ${JSON.stringify(json.errors)}`)
-  return json.data?.poolEvents ?? []
+  // Rely on Next.js' route-segment cache (`revalidate = 300`) rather than
+  // fetch's own cache — the latter is keyed on URL+body and would silently
+  // share state across deployments / preview branches.
+  const data = await gqlFetch<{ poolEvents: RawEvent[] }>(
+    API_URL,
+    QUERY,
+    { first: FETCH_LIMIT, chains: PROJECT_CONFIG.supportedNetworks },
+    { upstream: 'api-v3', label: 'biggest-swaps', cache: 'no-store' }
+  )
+  return data?.poolEvents ?? []
 }
 
 type TokenInfo = { chain: GqlChain; address: string; symbol: string | null; logoURI: string | null }
@@ -114,20 +113,14 @@ type TokenInfo = { chain: GqlChain; address: string; symbol: string | null; logo
 // window as the swaps fetch.
 async function fetchTokenMap(chains: GqlChain[]): Promise<Map<string, TokenInfo>> {
   if (chains.length === 0) return new Map()
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: TOKENS_QUERY, variables: { chains } }),
-    cache: 'no-store',
-  })
-  if (!res.ok) throw new Error(`api-v3 tokens HTTP ${res.status}`)
-  const json = (await res.json()) as {
-    data?: { tokenGetTokens: TokenInfo[] }
-    errors?: unknown
-  }
-  if (json.errors) throw new Error(`api-v3 tokens errors: ${JSON.stringify(json.errors)}`)
+  const data = await gqlFetch<{ tokenGetTokens: TokenInfo[] }>(
+    API_URL,
+    TOKENS_QUERY,
+    { chains },
+    { upstream: 'api-v3', label: 'biggest-swaps-tokens', cache: 'no-store' }
+  )
   const out = new Map<string, TokenInfo>()
-  for (const t of json.data?.tokenGetTokens ?? []) {
+  for (const t of data?.tokenGetTokens ?? []) {
     out.set(`${t.chain}:${t.address.toLowerCase()}`, t)
   }
   return out
@@ -136,7 +129,25 @@ async function fetchTokenMap(chains: GqlChain[]): Promise<Map<string, TokenInfo>
 async function buildPayload(): Promise<BiggestSwapsPayload> {
   const now = Math.floor(Date.now() / 1000)
   const cutoff = now - WINDOW_SECONDS
-  const events = await fetchSwaps()
+
+  // Fetch swaps and the full per-chain token list in parallel. Previously
+  // these were sequential: we waited for swaps, computed the set of chains
+  // appearing in the top-N, then fetched tokens for only those chains. The
+  // narrower second query saved bandwidth but blocked behind the first
+  // — ~200–400ms of avoidable latency per cache miss. Fetching for every
+  // supported network up front is wasteful per-byte but the result is
+  // identical from the user's perspective and the route is cached at 5min,
+  // so the extra token rows are paid for at most once per window.
+  const [events, tokenMap] = await Promise.all([
+    fetchSwaps(),
+    // Best-effort: a token-list failure shouldn't sink the whole route.
+    // Swallowing here matches the previous sequential code's behavior
+    // (icons just won't render).
+    fetchTokenMap(PROJECT_CONFIG.supportedNetworks as GqlChain[]).catch(
+      () => new Map<string, TokenInfo>()
+    ),
+  ])
+
   const top: BiggestSwap[] = events
     .filter(e => e.timestamp >= cutoff && Number.isFinite(e.valueUSD))
     .sort((a, b) => b.valueUSD - a.valueUSD)
@@ -154,19 +165,9 @@ async function buildPayload(): Promise<BiggestSwapsPayload> {
       tokenOutAmount: e.tokenOut?.amount ?? '0',
     }))
 
-  // Enrich with symbol + logoURI from api-v3's token list. Token lookup is
-  // best-effort: a failure here degrades to short-address rendering rather
-  // than failing the whole route.
-  const chains = Array.from(new Set(top.map(s => s.chain)))
-  let tokens: Map<string, TokenInfo> = new Map()
-  try {
-    tokens = await fetchTokenMap(chains)
-  } catch {
-    // swallow — icons just won't render
-  }
   const items: BiggestSwap[] = top.map(s => {
-    const tin = tokens.get(`${s.chain}:${s.tokenInAddress.toLowerCase()}`)
-    const tout = tokens.get(`${s.chain}:${s.tokenOutAddress.toLowerCase()}`)
+    const tin = tokenMap.get(`${s.chain}:${s.tokenInAddress.toLowerCase()}`)
+    const tout = tokenMap.get(`${s.chain}:${s.tokenOutAddress.toLowerCase()}`)
     return {
       ...s,
       tokenInSymbol: tin?.symbol ?? undefined,
@@ -200,6 +201,20 @@ export async function GET() {
     })
   } catch (err) {
     const now = Math.floor(Date.now() / 1000)
+    // Rate-limit and other upstream failures get a structured response so
+    // the client can render an honest "the API is throttled, wait and
+    // retry" message instead of a generic "something broke". The payload
+    // still includes the empty `items` array shape so legacy consumers
+    // that don't read `error` keep working.
+    if (err instanceof UpstreamError) {
+      const mapped = upstreamErrorToResponse(err, {
+        includeDevDetail: process.env.NODE_ENV !== 'production',
+      })
+      return Response.json(
+        { items: [], generatedAt: now, windowSeconds: WINDOW_SECONDS, ...mapped.body },
+        { status: mapped.status, headers: mapped.headers }
+      )
+    }
     return Response.json(
       { items: [], generatedAt: now, windowSeconds: WINDOW_SECONDS, error: String(err) },
       { status: 502, headers: { 'Cache-Control': 'no-store' } }

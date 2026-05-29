@@ -143,7 +143,15 @@ export async function GET(_request: Request, ctx: RouteContext): Promise<Respons
     const isStable = meta?.type === 'STABLE' || meta?.type === 'COMPOSABLE_STABLE'
 
     if (meta?.protocolVersion === 3) {
-      const u = await readUniversalV3State(chain, pool)
+      // Universal state and (when applicable) amp state are independent
+      // viem multicalls — neither needs the other's result. Running them
+      // sequentially used to add the full amp-state read latency on top of
+      // the universal one (~500ms each on cold drpc). With Promise.all the
+      // wall-clock for a STABLE pool is now max(u, s) instead of u + s.
+      const [u, s] = await Promise.all([
+        readUniversalV3State(chain, pool),
+        isStable ? readStableTypeState(chain, pool) : Promise.resolve(null),
+      ])
       if (u) {
         universal = {
           swapFeePercentage: u.swapFeePercentage,
@@ -152,20 +160,23 @@ export async function GET(_request: Request, ctx: RouteContext): Promise<Respons
           isPaused: u.isPaused,
           isInRecoveryMode: u.isInRecoveryMode,
         }
-        if (isStable) {
-          const s = await readStableTypeState(chain, pool)
-          if (s) {
-            typeSpecific = {
-              poolCreatorSwapFeePercentage: u.poolCreatorSwapFeePercentage,
-              poolCreatorYieldFeePercentage: u.poolCreatorYieldFeePercentage,
-              amplificationParameter: s.amplificationParameter,
-              amplificationState: s.amplificationState,
-            }
+        if (isStable && s) {
+          typeSpecific = {
+            poolCreatorSwapFeePercentage: u.poolCreatorSwapFeePercentage,
+            poolCreatorYieldFeePercentage: u.poolCreatorYieldFeePercentage,
+            amplificationParameter: s.amplificationParameter,
+            amplificationState: s.amplificationState,
           }
         }
       }
     } else if (meta?.protocolVersion === 2) {
-      const v2 = await readV2BasePoolState(chain, pool)
+      // Same parallelization rationale as the V3 branch — V2 stable pools
+      // get a ~500ms win when amp state runs concurrently with the base
+      // pool read.
+      const [v2, s] = await Promise.all([
+        readV2BasePoolState(chain, pool),
+        isStable ? readV2StableTypeState(chain, pool) : Promise.resolve(null),
+      ])
       if (v2) {
         universal = {
           swapFeePercentage: v2.swapFeePercentage,
@@ -177,15 +188,12 @@ export async function GET(_request: Request, ctx: RouteContext): Promise<Respons
           isPaused: v2.isPaused,
           isInRecoveryMode: v2.isInRecoveryMode ?? false,
         }
-        if (isStable) {
-          const s = await readV2StableTypeState(chain, pool)
-          if (s) {
-            typeSpecific = {
-              poolCreatorSwapFeePercentage: null,
-              poolCreatorYieldFeePercentage: null,
-              amplificationParameter: s.amplificationParameter,
-              amplificationState: s.amplificationState,
-            }
+        if (isStable && s) {
+          typeSpecific = {
+            poolCreatorSwapFeePercentage: null,
+            poolCreatorYieldFeePercentage: null,
+            amplificationParameter: s.amplificationParameter,
+            amplificationState: s.amplificationState,
           }
         }
       }

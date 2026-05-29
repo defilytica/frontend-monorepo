@@ -5,6 +5,7 @@ import type {
   BiggestSwap,
   BiggestSwapsPayload,
 } from '@analytics/lib/biggest-swaps/types'
+import { fetchWithRetry } from '@analytics/lib/upstream/fetch-retry'
 
 export type { BiggestSwap }
 
@@ -28,7 +29,8 @@ export function useBiggestSwaps() {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/biggest-swaps')
+    const controller = new AbortController()
+    fetchWithRetry('/api/biggest-swaps', { signal: controller.signal })
       .then(r => {
         if (!r.ok) throw new Error(`biggest-swaps HTTP ${r.status}`)
         return r.json() as Promise<BiggestSwapsPayload>
@@ -44,10 +46,12 @@ export function useBiggestSwaps() {
       })
       .catch(error => {
         if (cancelled) return
+        if (error instanceof Error && error.name === 'AbortError') return
         setState({ items: [], loading: false, error: error as Error, generatedAt: null })
       })
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
 
