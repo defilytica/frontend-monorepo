@@ -32,6 +32,7 @@ import { ChainSlug, getChainSlug } from '@repo/lib/modules/pool/pool.utils'
 import { isDrpcSupportedChain } from '@analytics/lib/contracts/drpc-endpoints'
 import { UpstreamError, gqlFetch as gqlFetchUpstream } from '@analytics/lib/upstream/gql'
 import {
+  readBufferStates,
   readGyroEclpTypeState,
   readLbpTypeState,
   readQuantAmmTypeState,
@@ -42,6 +43,7 @@ import {
   readV2BasePoolState,
   readV2StableTypeState,
   readWeightedTypeState,
+  type BufferState,
   type GyroEclpTypeState,
   type LbpTypeState,
   type QuantAmmTypeState,
@@ -79,12 +81,42 @@ export type PoolDetail = {
   swapFeeManager: string | null
   pauseManager: string | null
   poolCreator: string | null
-  tokens: {
+  /** True when at least one pool token is an ERC4626 wrapper — gates the
+   *  boosted-pool modules without needing to scan tokens client-side. */
+  hasErc4626: boolean
+  tokens: PoolDetailToken[]
+}
+
+export type PoolDetailToken = {
+  address: string
+  symbol: string
+  decimals: number
+  weight: string | null
+  logoURI: string | null
+  /** Pool's current balance of this token in human-readable units. */
+  balance: string
+  balanceUSD: string
+  /** ERC4626 conversion factor (wrapped → underlying). 1 for non-wrapped. */
+  priceRate: string
+  /** ERC4626-only fields. `isErc4626` gates whether the rest are meaningful;
+   *  api-v3 returns `null` for `maxDeposit`/`maxWithdraw`/`underlyingToken`
+   *  on non-wrapped tokens. */
+  isErc4626: boolean
+  maxDeposit: string | null
+  maxWithdraw: string | null
+  canUseBufferForSwaps: boolean | null
+  useUnderlyingForAddRemove: boolean | null
+  useWrappedForAddRemove: boolean | null
+  underlyingToken: {
     address: string
     symbol: string
-    weight: string | null
+    decimals: number
     logoURI: string | null
-  }[]
+  } | null
+  erc4626ReviewData: {
+    summary: string
+    warnings: string[]
+  } | null
 }
 
 export type PoolSnapshot = {
@@ -122,6 +154,10 @@ export type PoolPageData = {
     lbp: LbpTypeState | null
     quantAmm: QuantAmmTypeState | null
     stableSurge: StableSurgeState | null
+    /** Buffer state per ERC4626 token, one entry per wrapped token in
+     *  `poolDetail.tokens`. Only populated on v3 boosted pools — `null`
+     *  on v2, non-boosted v3, and chains without a VaultExplorer entry. */
+    bufferStates: BufferState[] | null
   }
 }
 
@@ -141,11 +177,32 @@ const POOL_DETAIL_QUERY = /* GraphQL */ `
       swapFeeManager
       pauseManager
       poolCreator
+      hasErc4626
       poolTokens {
         address
         symbol
+        decimals
         weight
         logoURI
+        balance
+        balanceUSD
+        priceRate
+        isErc4626
+        maxDeposit
+        maxWithdraw
+        canUseBufferForSwaps
+        useUnderlyingForAddRemove
+        useWrappedForAddRemove
+        underlyingToken {
+          address
+          symbol
+          decimals
+          logoURI
+        }
+        erc4626ReviewData {
+          summary
+          warnings
+        }
       }
     }
   }
@@ -315,11 +372,32 @@ export default async function Page({
       swapFeeManager: string | null
       pauseManager: string | null
       poolCreator: string | null
+      hasErc4626: boolean
       poolTokens: {
         address: string
         symbol: string
+        decimals: number
         weight: string | null
         logoURI: string | null
+        balance: string
+        balanceUSD: string
+        priceRate: string
+        isErc4626: boolean
+        maxDeposit: string | null
+        maxWithdraw: string | null
+        canUseBufferForSwaps: boolean | null
+        useUnderlyingForAddRemove: boolean | null
+        useWrappedForAddRemove: boolean | null
+        underlyingToken: {
+          address: string
+          symbol: string
+          decimals: number
+          logoURI: string | null
+        } | null
+        erc4626ReviewData: {
+          summary: string
+          warnings: string[]
+        } | null
       }[]
     }
   }
@@ -375,8 +453,20 @@ export default async function Page({
     tokens: detailRes.poolGetPool.poolTokens.map(t => ({
       address: t.address,
       symbol: t.symbol,
+      decimals: t.decimals,
       weight: t.weight,
       logoURI: t.logoURI,
+      balance: t.balance,
+      balanceUSD: t.balanceUSD,
+      priceRate: t.priceRate,
+      isErc4626: t.isErc4626,
+      maxDeposit: t.maxDeposit,
+      maxWithdraw: t.maxWithdraw,
+      canUseBufferForSwaps: t.canUseBufferForSwaps,
+      useUnderlyingForAddRemove: t.useUnderlyingForAddRemove,
+      useWrappedForAddRemove: t.useWrappedForAddRemove,
+      underlyingToken: t.underlyingToken,
+      erc4626ReviewData: t.erc4626ReviewData,
     })),
   }
 
@@ -392,6 +482,7 @@ export default async function Page({
   let lbp: LbpTypeState | null = null
   let quantAmm: QuantAmmTypeState | null = null
   let stableSurge: StableSurgeState | null = null
+  let bufferStates: BufferState[] | null = null
   const isStable = poolDetail.type === 'STABLE' || poolDetail.type === 'COMPOSABLE_STABLE'
 
   // Wrap a state read so a single reverting helper-contract call degrades to
@@ -405,10 +496,17 @@ export default async function Page({
   if (poolDetail.protocolVersion === 3) {
     const addr = contractAddress as Address
     const t = poolDetail.type
+    // Buffer reads only when the pool actually has ERC4626 tokens — saves
+    // a multicall on plain v3 pools, which are the majority.
+    const wrappedAddrs = poolDetail.hasErc4626
+      ? poolDetail.tokens
+          .filter(token => token.isErc4626)
+          .map(token => token.address as Address)
+      : []
     // One read per lane, dispatched on pool type. At most one type-specific
     // read fires (others resolve to `null` synchronously); `stableSurge` is
     // additive on STABLE pools and self-nulls when the hook isn't attached.
-    const [u, s, w, ge, rc, l, qa, ss] = await Promise.all([
+    const [u, s, w, ge, rc, l, qa, ss, bs] = await Promise.all([
       rescue('readUniversalV3State', readUniversalV3State(chain, addr)),
       isStable ? rescue('readStableTypeState', readStableTypeState(chain, addr)) : null,
       t === 'WEIGHTED' ? rescue('readWeightedTypeState', readWeightedTypeState(chain, addr)) : null,
@@ -421,6 +519,9 @@ export default async function Page({
         ? rescue('readQuantAmmTypeState', readQuantAmmTypeState(chain, addr))
         : null,
       isStable ? rescue('readStableSurgeState', readStableSurgeState(chain, addr)) : null,
+      wrappedAddrs.length > 0
+        ? rescue('readBufferStates', readBufferStates(chain, wrappedAddrs))
+        : null,
     ])
     universal = u
     stable = s
@@ -430,6 +531,7 @@ export default async function Page({
     lbp = l
     quantAmm = qa
     stableSurge = ss
+    bufferStates = bs
   } else if (poolDetail.protocolVersion === 2) {
     const [b, s] = await Promise.all([
       readV2BasePoolState(chain, contractAddress as Address).catch((err: unknown) => {
@@ -488,6 +590,7 @@ export default async function Page({
       lbp,
       quantAmm,
       stableSurge,
+      bufferStates,
     },
   }
 

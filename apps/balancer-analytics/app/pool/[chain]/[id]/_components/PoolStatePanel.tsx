@@ -17,6 +17,7 @@ import {
 import Link from 'next/link'
 import { ArrowUpRight } from 'react-feather'
 import type {
+  BufferState,
   GyroEclpTypeState,
   LbpTypeState,
   QuantAmmTypeState,
@@ -25,7 +26,7 @@ import type {
   StableTypeState,
   WeightedTypeState,
 } from '@analytics/lib/pool-state/read'
-import type { PoolPageData } from '../page'
+import type { PoolDetailToken, PoolPageData } from '../page'
 
 // Block-explorer URL stems per chain (mirrors the per-chain map in
 // PoolEventLog so the analytics surface uses one address-link target).
@@ -483,6 +484,278 @@ function StableSurgeSection({
   )
 }
 
+// ── ERC4626 buffer section ─────────────────────────────────────────────
+//
+// One TypeSection per wrapped token. Each surfaces the Vault buffer's
+// internal composition (underlying vs wrapped held by the buffer) plus
+// the ERC4626 wrapper's own deposit/withdraw caps — both pieces are
+// "current state" of how the pool can route swaps through this token.
+
+const tokenCompact = new Intl.NumberFormat('en-US', {
+  notation: 'compact',
+  maximumFractionDigits: 2,
+})
+
+function formatTokenCompact(amount: number): string {
+  if (!Number.isFinite(amount)) return '—'
+  if (amount === 0) return '0'
+  return tokenCompact.format(amount)
+}
+
+function parseNum(s: string | null | undefined): number {
+  if (s == null) return NaN
+  const n = Number(s)
+  return Number.isFinite(n) ? n : NaN
+}
+
+/** Convert a raw u256 string to a human number using `decimals`. Loses
+ *  precision past 2^53 but the display values we surface (USD-stable-
+ *  pool buffers, ETH-likes) live well below that ceiling. */
+function rawToHuman(raw: string | null, decimals: number): number {
+  if (!raw || decimals < 0 || !Number.isFinite(decimals)) return NaN
+  try {
+    return Number(BigInt(raw)) / 10 ** decimals
+  } catch {
+    return NaN
+  }
+}
+
+/** Tight horizontal capacity bar — fits inside a StateRow value column.
+ *  Shows what fraction of the wrapper's cap the pool's current position
+ *  occupies, with a small percentage readout above and the cap value
+ *  beneath. Red when the pool position exceeds the cap (a full one-shot
+ *  unwind would not fit). */
+function CapacityBar({
+  positionLabel,
+  position,
+  cap,
+  unit,
+}: {
+  positionLabel: string
+  position: number
+  cap: number
+  unit: string
+}): React.JSX.Element {
+  const hasData = Number.isFinite(position) && Number.isFinite(cap) && cap >= 0
+  const overflow = hasData && cap > 0 ? position > cap : false
+  const pct = !hasData
+    ? 0
+    : cap <= 0
+      ? position > 0
+        ? 100
+        : 0
+      : Math.min((position / cap) * 100, 100)
+  return (
+    <VStack align="stretch" spacing="2xs" w="full">
+      <Flex align="center" justify="space-between">
+        <Text color={overflow ? 'red.400' : 'font.secondary'} fontFamily="mono" fontSize="xs">
+          {hasData ? `${pct.toFixed(1)}%` : '—'}
+        </Text>
+        <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          cap {formatTokenCompact(cap)} {unit}
+        </Text>
+      </Flex>
+      <Box bg="background.level3" h="6px" overflow="hidden" rounded="sm" w="full">
+        <Box
+          bg={overflow ? 'red.500' : 'primary.500'}
+          h="full"
+          transition="width 0.3s ease"
+          w={`${pct}%`}
+        />
+      </Box>
+      <Text color="font.secondary" fontSize="2xs">
+        {positionLabel}
+      </Text>
+    </VStack>
+  )
+}
+
+/** Buffer composition bar — left segment = underlying balance, right =
+ *  wrapped balance (converted to underlying units via priceRate).
+ *  Surfaces the imbalance % so a reader can scan whether the next swap
+ *  is likely to trigger a real wrap/unwrap on-chain. */
+function BufferSplitBar({
+  underlyingAmount,
+  underlyingSymbol,
+  wrappedAmountAsUnderlying,
+  wrappedSymbol,
+}: {
+  underlyingAmount: number
+  underlyingSymbol: string
+  wrappedAmountAsUnderlying: number
+  wrappedSymbol: string
+}): React.JSX.Element {
+  const total = underlyingAmount + wrappedAmountAsUnderlying
+  const hasData = Number.isFinite(total) && total > 0
+  const underlyingPct = hasData ? (underlyingAmount / total) * 100 : 0
+  const wrappedPct = hasData ? 100 - underlyingPct : 0
+  const imbalance = hasData ? Math.abs(underlyingPct - 50) : null
+  const imbalanceColor =
+    imbalance == null
+      ? 'font.secondary'
+      : imbalance >= 25
+        ? 'red.400'
+        : imbalance >= 10
+          ? 'yellow.400'
+          : 'green.400'
+  return (
+    <VStack align="stretch" spacing="2xs" w="full">
+      <Flex align="center" justify="space-between">
+        <Text color="font.secondary" fontFamily="mono" fontSize="xs">
+          {hasData ? `${formatTokenCompact(total)} ${underlyingSymbol}` : '—'}
+        </Text>
+        <Text color={imbalanceColor} fontFamily="mono" fontSize="2xs">
+          {imbalance == null ? '' : `${imbalance.toFixed(1)}% off 50/50`}
+        </Text>
+      </Flex>
+      <Box bg="background.level3" h="8px" overflow="hidden" rounded="sm" w="full">
+        <Flex h="full" w="full">
+          <Box bg="primary.400" h="full" transition="width 0.3s ease" w={`${underlyingPct}%`} />
+          <Box bg="purple.400" h="full" transition="width 0.3s ease" w={`${wrappedPct}%`} />
+        </Flex>
+      </Box>
+      <HStack justify="space-between" spacing="xs">
+        <HStack spacing="2xs">
+          <Box bg="primary.400" h="2" rounded="sm" w="2" />
+          <Text color="font.secondary" fontSize="2xs">
+            {formatTokenCompact(underlyingAmount)} {underlyingSymbol}
+          </Text>
+        </HStack>
+        <HStack spacing="2xs">
+          <Box bg="purple.400" h="2" rounded="sm" w="2" />
+          <Text color="font.secondary" fontSize="2xs">
+            {formatTokenCompact(wrappedAmountAsUnderlying)} as {wrappedSymbol}
+          </Text>
+        </HStack>
+      </HStack>
+    </VStack>
+  )
+}
+
+function BufferSection({
+  token,
+  buffer,
+  manageButton,
+}: {
+  token: PoolDetailToken
+  buffer: BufferState | null
+  manageButton: React.ReactNode
+}): React.JSX.Element {
+  const priceRate = parseNum(token.priceRate)
+  const balanceWrapped = parseNum(token.balance)
+  const positionInUnderlying =
+    Number.isFinite(balanceWrapped) && Number.isFinite(priceRate)
+      ? balanceWrapped * priceRate
+      : NaN
+  const maxDeposit = parseNum(token.maxDeposit ?? '')
+  const maxWithdraw = parseNum(token.maxWithdraw ?? '')
+  const underlyingSymbol = token.underlyingToken?.symbol ?? '—'
+  const underlyingDecimals = token.underlyingToken?.decimals ?? token.decimals
+
+  const bufferUnderlying = buffer
+    ? rawToHuman(buffer.underlyingBalanceRaw, underlyingDecimals)
+    : NaN
+  const bufferWrapped = buffer ? rawToHuman(buffer.wrappedBalanceRaw, token.decimals) : NaN
+  const bufferWrappedAsUnderlying =
+    Number.isFinite(bufferWrapped) && Number.isFinite(priceRate)
+      ? bufferWrapped * priceRate
+      : NaN
+
+  const review = (token.erc4626ReviewData?.summary ?? '').toLowerCase()
+  const reviewBadge =
+    review === 'safe' ? (
+      <Badge colorScheme="green" size="sm">
+        safe
+      </Badge>
+    ) : review === 'unsafe' ? (
+      <Badge colorScheme="red" size="sm">
+        unsafe
+      </Badge>
+    ) : review ? (
+      <Badge colorScheme="yellow" size="sm">
+        {review}
+      </Badge>
+    ) : null
+
+  const uninitialized = buffer?.isInitialized === false
+  const initBadge = uninitialized ? (
+    <Badge colorScheme="red" size="sm">
+      uninitialized
+    </Badge>
+  ) : null
+
+  const warnings = token.erc4626ReviewData?.warnings ?? []
+
+  return (
+    <TypeSection
+      badge={
+        <HStack spacing="xs">
+          {initBadge}
+          {reviewBadge}
+        </HStack>
+      }
+      title={`Buffer: ${token.symbol} ↔ ${underlyingSymbol}`}
+    >
+      <StateRow
+        hint="balanced 50/50 means most swaps avoid wrapping on-chain"
+        label="Composition"
+        value={
+          buffer ? (
+            <BufferSplitBar
+              underlyingAmount={bufferUnderlying}
+              underlyingSymbol={underlyingSymbol}
+              wrappedAmountAsUnderlying={bufferWrappedAsUnderlying}
+              wrappedSymbol={token.symbol}
+            />
+          ) : (
+            'buffer read unavailable'
+          )
+        }
+      />
+      <StateRow
+        hint="how much underlying the pool's wrapped position represents"
+        label="Pool position"
+        value={`${formatTokenCompact(positionInUnderlying)} ${underlyingSymbol}`}
+      />
+      <StateRow
+        hint="how much can be deposited into the ERC4626 vault right now"
+        label="Deposit headroom"
+        value={
+          <CapacityBar
+            cap={maxDeposit}
+            position={positionInUnderlying}
+            positionLabel={`pool position ${formatTokenCompact(positionInUnderlying)} ${underlyingSymbol}`}
+            unit={underlyingSymbol}
+          />
+        }
+      />
+      <StateRow
+        hint="how much can be withdrawn from the ERC4626 vault right now"
+        label="Withdraw headroom"
+        value={
+          <CapacityBar
+            cap={maxWithdraw}
+            position={positionInUnderlying}
+            positionLabel={`pool position ${formatTokenCompact(positionInUnderlying)} ${underlyingSymbol}`}
+            unit={underlyingSymbol}
+          />
+        }
+      />
+      {warnings.length > 0 && (
+        <StateRow
+          label="Warnings"
+          value={
+            <Text fontSize="xs" wordBreak="break-word">
+              {warnings.join(' · ')}
+            </Text>
+          }
+        />
+      )}
+      {manageButton}
+    </TypeSection>
+  )
+}
+
 // Fixed pixel width for the label column on `md+`. Using exact width
 // (not `minWidth`) so every section's rows align to the same x-position
 // regardless of label content. 180px comfortably fits every label we
@@ -665,6 +938,32 @@ export function PoolStatePanel({
       />
     ) : null
 
+  // Buffer sections — one section per ERC4626 token. The buffer-state
+  // RPC read fires on the page and resolves to `null` for chains without
+  // a VaultExplorer entry; the section renders capacity-bars-only in
+  // that case so users still see maxDeposit/maxWithdraw context.
+  const wrappedTokens = isV3 ? poolDetail.tokens.filter(t => t.isErc4626) : []
+  const buffersByAddress = new Map<string, BufferState>()
+  if (state.bufferStates) {
+    for (const b of state.bufferStates) buffersByAddress.set(b.wrappedToken.toLowerCase(), b)
+  }
+  const bufferSections = wrappedTokens.map(token => (
+    <BufferSection
+      buffer={buffersByAddress.get(token.address.toLowerCase()) ?? null}
+      key={token.address}
+      manageButton={
+        <ManageButton
+          link={{
+            label: 'Manage buffer',
+            hint: 'Buffer management payload builder on ops.balancer.fi',
+            href: `${OPS_BASE}/payload-builder/manage-buffer?network=${opsNetwork}&token=${token.address}`,
+          }}
+        />
+      }
+      token={token}
+    />
+  ))
+
   // Each `state.*` slot is at most one block per pool — gather the
   // type-specific Card to render in the grid as a single ReactNode so
   // the grid composition stays declarative below.
@@ -789,6 +1088,8 @@ export function PoolStatePanel({
         {state.stableSurge && (
           <StableSurgeSection manageButton={surgeManageButton} ss={state.stableSurge} />
         )}
+
+        {bufferSections}
       </SimpleGrid>
     </VStack>
   )
