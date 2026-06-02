@@ -775,15 +775,216 @@ function QuantAmmSection({
   )
 }
 
+// ── StableSurge math — derives "is surging?" + estimated fee ─────────────
+//
+// Port of `calculateStableSurgeBalanceMetrics` from balancer-ops-frontend
+// (commit 67fefe1, lib/utils/calculateStableSurgeBalanceMetrics.ts). The
+// algorithm is pure client-side derivation from per-token `balanceUSD`
+// shares + the hook's threshold/max-fee params — no extra RPC reads.
+type SurgeMetrics = {
+  /** Per-token TVL share, in percent (0–100). */
+  tokenPercentages: { symbol: string; pct: number }[]
+  /** Reference centroid used to compute deviations. For 2-token pools this
+   *  is always 50; for 3+ tokens it's the median of the per-token shares
+   *  (matches ops behavior — `median` is more robust than `mean` against a
+   *  single outlier token blowing up the imbalance signal). */
+  median: number
+  /** Sum of absolute deviations from the median, in percentage points. */
+  totalImbalance: number
+  /** Hook threshold expressed in percentage points (5e16 wei → 5). */
+  surgeThresholdPct: number
+  /** Hook max swap fee expressed in percentage points. */
+  maxSurgeFeePct: number
+  /** True when totalImbalance has crossed the threshold — pool charges
+   *  a higher swap fee in this state. */
+  isInSurgeMode: boolean
+  /** Linear estimate of the current dynamic swap fee. Zero when not
+   *  surging; ramps from 0 → maxSurgeFee as the imbalance overshoots
+   *  the threshold by 0 → 100% (clamped). */
+  estimatedSurgeFeePct: number
+}
+
+function computeSurgeMetrics(
+  ss: StableSurgeState,
+  tokens: PoolDetailToken[]
+): SurgeMetrics {
+  let tvl = 0
+  const balancesUsd = tokens.map(t => {
+    const b = Number(t.balanceUSD) || 0
+    tvl += b
+    return b
+  })
+  const tokenPercentages = balancesUsd.map((b, i) => ({
+    symbol: tokens[i].symbol,
+    pct: tvl > 0 ? (b / tvl) * 100 : 0,
+  }))
+
+  let median: number
+  if (tokens.length === 2) {
+    median = 50
+  } else {
+    const sorted = tokenPercentages.map(t => t.pct).sort((a, b) => a - b)
+    const mid = Math.floor(sorted.length / 2)
+    median =
+      sorted.length === 0
+        ? 0
+        : sorted.length % 2 === 0
+          ? (sorted[mid - 1] + sorted[mid]) / 2
+          : sorted[mid]
+  }
+
+  const totalImbalance = tokenPercentages.reduce(
+    (acc, t) => acc + Math.abs(t.pct - median),
+    0
+  )
+  const surgeThresholdPct = (Number(ss.surgeThresholdPercentage) / 1e18) * 100
+  const maxSurgeFeePct = (Number(ss.maxSurgeFeePercentage) / 1e18) * 100
+  const isInSurgeMode = totalImbalance > surgeThresholdPct
+
+  let estimatedSurgeFeePct = 0
+  if (isInSurgeMode && surgeThresholdPct > 0) {
+    const intensity = Math.min(
+      (totalImbalance - surgeThresholdPct) / surgeThresholdPct,
+      1
+    )
+    estimatedSurgeFeePct = intensity * maxSurgeFeePct
+  }
+
+  return {
+    tokenPercentages,
+    median,
+    totalImbalance,
+    surgeThresholdPct,
+    maxSurgeFeePct,
+    isInSurgeMode,
+    estimatedSurgeFeePct,
+  }
+}
+
+/** Horizontal imbalance gauge — green zone up to threshold, red zone past
+ *  it. Marker shows the current totalImbalance position. Scale auto-sizes
+ *  so the threshold + current marker always sit in a readable region of
+ *  the bar (a 5% threshold doesn't get visually squashed against the left
+ *  edge of a 0–100% track). */
+function SurgeImbalanceBar({
+  imbalance,
+  threshold,
+  isInSurgeMode,
+}: {
+  imbalance: number
+  threshold: number
+  isInSurgeMode: boolean
+}): React.JSX.Element {
+  // Scale so the bar's right edge is comfortably past whichever is bigger
+  // — the threshold or the current imbalance — but never under 10 (so a
+  // tiny threshold like 1% still has visible resolution).
+  const scaleMax = Math.max(threshold * 3, imbalance * 1.2, 10)
+  const thresholdPos = Math.min((threshold / scaleMax) * 100, 100)
+  const currentPos = Math.min((imbalance / scaleMax) * 100, 100)
+  const markerColor = isInSurgeMode ? 'red.400' : 'green.300'
+  return (
+    <VStack align="stretch" spacing="2xs" w="full">
+      <Box h="14px" position="relative" w="full">
+        <Flex
+          borderColor="background.level0"
+          borderWidth="1px"
+          h="10px"
+          overflow="hidden"
+          position="absolute"
+          rounded="sm"
+          top="2px"
+          w="full"
+        >
+          <Box
+            bgGradient="linear(to-b, green.300, green.500)"
+            h="full"
+            w={`${thresholdPos}%`}
+          />
+          <Box
+            bgGradient="linear(to-b, red.300, red.500)"
+            h="full"
+            w={`${100 - thresholdPos}%`}
+          />
+        </Flex>
+        {/* Marker — vertical pill at the current imbalance position. */}
+        <Box
+          bg={markerColor}
+          boxShadow="0 0 0 1px var(--chakra-colors-background-level0)"
+          h="14px"
+          left={`${currentPos}%`}
+          position="absolute"
+          rounded="sm"
+          top="0"
+          transform="translateX(-50%)"
+          w="3px"
+          zIndex={1}
+        />
+      </Box>
+      <Flex justify="space-between">
+        <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          0%
+        </Text>
+        <Text color="orange.300" fontFamily="mono" fontSize="2xs">
+          threshold {threshold.toFixed(2)}%
+        </Text>
+        <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          {scaleMax.toFixed(0)}%
+        </Text>
+      </Flex>
+    </VStack>
+  )
+}
+
 function StableSurgeSection({
   ss,
+  tokens,
   manageButton,
 }: {
   ss: StableSurgeState
+  /** Pool tokens with `balanceUSD` populated — used to derive the
+   *  current per-token shares the hook compares against the threshold. */
+  tokens: PoolDetailToken[]
   manageButton?: React.ReactNode
 }): React.JSX.Element {
+  const m = computeSurgeMetrics(ss, tokens)
+  const deviationFmt = (n: number) =>
+    `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
+
   return (
-    <TypeSection title="StableSurge hook">
+    <TypeSection
+      badge={
+        <Badge colorScheme={m.isInSurgeMode ? 'red' : 'green'} size="sm">
+          {m.isInSurgeMode ? 'surging' : 'stable'}
+        </Badge>
+      }
+      title="StableSurge hook"
+    >
+      <StateRow
+        hint="sum of absolute token-share deviations from the median"
+        label="Current imbalance"
+        value={
+          <VStack align="stretch" spacing="xs" w="full">
+            <HStack align="baseline" spacing="sm">
+              <Text
+                color={m.isInSurgeMode ? 'red.300' : 'font.primary'}
+                fontFamily="mono"
+                fontSize="md"
+                fontWeight={600}
+              >
+                {m.totalImbalance.toFixed(2)}%
+              </Text>
+              <Text color="font.secondary" fontFamily="mono" fontSize="xs">
+                vs threshold {m.surgeThresholdPct.toFixed(2)}%
+              </Text>
+            </HStack>
+            <SurgeImbalanceBar
+              imbalance={m.totalImbalance}
+              isInSurgeMode={m.isInSurgeMode}
+              threshold={m.surgeThresholdPct}
+            />
+          </VStack>
+        }
+      />
       <StateRow
         hint="imbalance above which surge applies"
         label="Surge threshold"
@@ -794,6 +995,50 @@ function StableSurgeSection({
         label="Max surge fee"
         value={formatPercent(ss.maxSurgeFeePercentage)}
       />
+      {m.isInSurgeMode && (
+        <StateRow
+          hint="current dynamic swap fee derived from how far past the threshold the imbalance is"
+          label="Estimated surge fee"
+          value={
+            <Text color="red.300" fontFamily="mono" fontSize="sm" fontWeight={600}>
+              {m.estimatedSurgeFeePct.toFixed(3)}%
+            </Text>
+          }
+        />
+      )}
+      <Divider opacity={0.4} />
+      <Box>
+        <Text color="font.secondary" fontSize="xs" mb="xs">
+          Balance distribution
+        </Text>
+        <VStack align="stretch" spacing="2xs" w="full">
+          {m.tokenPercentages.map((t, i) => {
+            const dev = t.pct - m.median
+            const devAbs = Math.abs(dev)
+            // Color the deviation if it's a meaningful contributor to imbalance.
+            // Use the threshold as the "this matters" yardstick — a deviation
+            // larger than the threshold is by definition pushing the pool
+            // toward surge.
+            const devColor =
+              devAbs >= m.surgeThresholdPct ? 'red.300' : devAbs >= 1 ? 'orange.300' : 'font.secondary'
+            return (
+              <HStack justify="space-between" key={i} spacing="sm" w="full">
+                <Text fontFamily="mono" fontSize="sm">
+                  {t.symbol}
+                </Text>
+                <HStack spacing="md">
+                  <Text fontFamily="mono" fontSize="sm">
+                    {t.pct.toFixed(2)}%
+                  </Text>
+                  <Text color={devColor} fontFamily="mono" fontSize="xs" minW="60px" textAlign="right">
+                    {deviationFmt(dev)}
+                  </Text>
+                </HStack>
+              </HStack>
+            )
+          })}
+        </VStack>
+      </Box>
       {manageButton}
     </TypeSection>
   )
@@ -1407,7 +1652,11 @@ export function PoolStatePanel({
         {typeSpecificCard}
 
         {state.stableSurge && (
-          <StableSurgeSection manageButton={surgeManageButton} ss={state.stableSurge} />
+          <StableSurgeSection
+            manageButton={surgeManageButton}
+            ss={state.stableSurge}
+            tokens={poolDetail.tokens}
+          />
         )}
 
         {bufferSections}
