@@ -17,6 +17,7 @@
  */
 
 import type { PoolPageData } from '../page'
+import { PoolAutoRangeHistory } from './PoolAutoRangeHistory/PoolAutoRangeHistory'
 import { PoolOrderFlow } from './PoolOrderFlow/PoolOrderFlow'
 
 type PoolTypeModule = {
@@ -38,5 +39,28 @@ export const POOL_TYPE_MODULES: readonly PoolTypeModule[] = [
         poolTvlUsd={snapshots[snapshots.length - 1]?.totalLiquidity ?? 0}
       />
     ),
+  },
+  {
+    key: 'autorange-history',
+    // Gated on contract type — the archive sampler only makes sense for
+    // AutoRange (api-v3 enum `RECLAMM`). The card fetches its own state
+    // via a client hook so the page render is never blocked on the
+    // archive fan-out.
+    shouldRender: ({ poolDetail }) => poolDetail.type === 'RECLAMM',
+    render: ({ poolDetail, range, state }) => {
+      const symbolA = poolDetail.tokens[0]?.symbol ?? 'A'
+      const symbolB = poolDetail.tokens[1]?.symbol ?? 'B'
+      const marginFraction =
+        state.reclamm ? Number(state.reclamm.centerednessMargin) / 1e18 : 0
+      return (
+        <PoolAutoRangeHistory
+          centerednessMarginFraction={marginFraction}
+          chain={poolDetail.chain}
+          pairLabel={`${symbolB} / ${symbolA}`}
+          poolId={poolDetail.id}
+          range={range}
+        />
+      )
+    },
   },
 ]
