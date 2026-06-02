@@ -401,7 +401,19 @@ export default async function Page({
       }[]
     }
   }
-  type SnapshotsRes = { snapshots: PoolSnapshot[] }
+  // api-v3 returns `BigDecimal` values as JSON strings — the on-wire shape
+  // diverges from the `PoolSnapshot` type below, which surfaces real numbers
+  // to consumers. We parse once at the boundary so downstream code never
+  // has to second-guess the runtime type.
+  type RawSnapshot = {
+    timestamp: number
+    totalLiquidity: string
+    volume24h: string
+    fees24h: string
+    surplus24h: string
+    sharePrice: string
+  }
+  type SnapshotsRes = { snapshots: RawSnapshot[] }
 
   // Pool detail + snapshots are fast (api-v3 only, ~200–500ms each). They're
   // all the data the page needs to render the header, snapshot tile, and
@@ -559,7 +571,18 @@ export default async function Page({
   // on the *latest snapshot timestamp* rather than `Date.now()` — pure
   // function of the input, no clock dependency in the render path, and
   // naturally robust to stale series where "now" is past the last point.
-  const rawSnapshots = snapshotsRes?.snapshots ?? []
+  // Coerce api-v3's BigDecimal strings to JS numbers up front. NaN-on-bad-
+  // input is acceptable here — every metric formatter downstream already
+  // handles that case (the chart's interpolators and the snapshot tile's
+  // Intl.NumberFormat call both pass NaN through as "—"-style fallbacks).
+  const rawSnapshots: PoolSnapshot[] = (snapshotsRes?.snapshots ?? []).map(s => ({
+    timestamp: s.timestamp,
+    totalLiquidity: Number(s.totalLiquidity),
+    volume24h: Number(s.volume24h),
+    fees24h: Number(s.fees24h),
+    surplus24h: Number(s.surplus24h),
+    sharePrice: Number(s.sharePrice),
+  }))
   let trimmedSnapshots = rawSnapshots
   if (range === '30d' && rawSnapshots.length > 0) {
     let latest = 0

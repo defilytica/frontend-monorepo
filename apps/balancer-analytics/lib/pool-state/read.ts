@@ -80,6 +80,15 @@ const V3_GYRO_ECLP_ABI = parseAbi([
 
 const V3_RECLAMM_ABI = parseAbi([
   'function computeCurrentPriceRatio() view returns (uint256)',
+  'function computeCurrentPriceRange() view returns (uint256 minPrice, uint256 maxPrice)',
+  'function computeCurrentVirtualBalances() view returns (uint256 virtualBalanceA, uint256 virtualBalanceB, bool changed)',
+  // Returns the per-token live balances as 1e18-scaled values (the Vault
+  // normalizes every pool token to 18-decimal internally). Pairs with
+  // virtualBalances under the same scaling so the margin math in the
+  // section component sees consistent units. Spot price is derived from
+  // these on the client (matches frontend-v3) — no `computeCurrentSpotPrice`
+  // call because that function isn't present on every reCLAMM deployment.
+  'function getCurrentLiveBalances() view returns (uint256[] balancesLiveScaled18)',
   'function getCenterednessMargin() view returns (uint256)',
   'function getDailyPriceShiftExponent() view returns (uint256)',
   'function isPoolWithinTargetRange() view returns (bool)',
@@ -167,9 +176,31 @@ export type GyroEclpTypeState = {
 }
 
 export type ReclammTypeState = {
+  /** Current ratio of max/min price (1e18-scaled). */
   currentPriceRatio: string
+  /** Current minimum price of the active range (1e18-scaled, token B per
+   *  token A — same orientation the contract uses internally). */
+  minPrice: string
+  /** Current maximum price of the active range. */
+  maxPrice: string
+  /** Virtual balances after the contract's just-in-time recompute, 1e18
+   *  fixed-point scaled. Combined with `liveBalance{A,B}` these give the
+   *  invariant and let the section compute lower/upper margin prices —
+   *  i.e. the boundaries of the green "target range" band on the chart. */
+  virtualBalanceA: string
+  virtualBalanceB: string
+  /** Live token balances, 1e18 fixed-point scaled (the Vault normalizes
+   *  every pool token to 18 decimals internally — so a 6-decimal USDC
+   *  balance of 1.0 reads as `1e18` here too). */
+  liveBalanceA: string
+  liveBalanceB: string
+  /** Centeredness margin (1e18-scaled fraction). The pool starts shifting
+   *  to recenter once centeredness drops below this margin. */
   centerednessMargin: string
+  /** Daily price-shift exponent (1e18-scaled fraction). Caps how much the
+   *  bounds can drift per day when out-of-center. */
   dailyPriceShiftExponent: string
+  /** Last on-chain interaction timestamp. Bounds drift is keyed off this. */
   lastTimestamp: number
   isWithinTargetRange: boolean
   priceRatio: {
@@ -520,8 +551,13 @@ export async function readGyroEclpTypeState(
   }
 }
 
-/** reCLAMM — current price ratio, centeredness, shift exponent, range
- *  status, and the price-ratio update schedule. */
+/** AutoRange (contract type `RECLAMM`) — full live state for the bounds
+ *  visualization: price ratio, min/max range, spot price, live + virtual
+ *  balances, centeredness, shift exponent, range status, last interaction,
+ *  and the price-ratio update schedule. One multicall, every read in
+ *  `allowFailure` so a partial-result still surfaces the values we did
+ *  get. Function name keeps the legacy `reclamm` token to match the
+ *  contract type slug callers dispatch on (`poolDetail.type === 'RECLAMM'`). */
 export async function readReclammTypeState(
   chain: GqlChain,
   poolAddress: Address
@@ -530,6 +566,9 @@ export async function readReclammTypeState(
   const results = await client.multicall({
     contracts: [
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentPriceRatio' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentPriceRange' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentVirtualBalances' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getCurrentLiveBalances' },
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getCenterednessMargin' },
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getDailyPriceShiftExponent' },
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'isPoolWithinTargetRange' },
@@ -539,8 +578,17 @@ export async function readReclammTypeState(
     allowFailure: true,
   })
   if (results[0].status !== 'success') return null
-  const prs = results[5].status === 'success'
-    ? (results[5].result as {
+  const range = results[1].status === 'success'
+    ? (results[1].result as readonly [bigint, bigint])
+    : null
+  const vb = results[2].status === 'success'
+    ? (results[2].result as readonly [bigint, bigint, boolean])
+    : null
+  const lb = results[3].status === 'success'
+    ? (results[3].result as readonly bigint[])
+    : null
+  const prs = results[8].status === 'success'
+    ? (results[8].result as {
         startFourthRootPriceRatio: bigint
         endFourthRootPriceRatio: bigint
         priceRatioUpdateStartTime: number
@@ -549,14 +597,20 @@ export async function readReclammTypeState(
     : null
   return {
     currentPriceRatio: (results[0].result as bigint).toString(),
+    minPrice: range ? range[0].toString() : '0',
+    maxPrice: range ? range[1].toString() : '0',
+    virtualBalanceA: vb ? vb[0].toString() : '0',
+    virtualBalanceB: vb ? vb[1].toString() : '0',
+    liveBalanceA: lb && lb.length >= 2 ? lb[0].toString() : '0',
+    liveBalanceB: lb && lb.length >= 2 ? lb[1].toString() : '0',
     centerednessMargin:
-      results[1].status === 'success' ? (results[1].result as bigint).toString() : '0',
+      results[4].status === 'success' ? (results[4].result as bigint).toString() : '0',
     dailyPriceShiftExponent:
-      results[2].status === 'success' ? (results[2].result as bigint).toString() : '0',
+      results[5].status === 'success' ? (results[5].result as bigint).toString() : '0',
     isWithinTargetRange:
-      results[3].status === 'success' ? (results[3].result as boolean) : false,
+      results[6].status === 'success' ? (results[6].result as boolean) : false,
     lastTimestamp:
-      results[4].status === 'success' ? Number(results[4].result as bigint) : 0,
+      results[7].status === 'success' ? Number(results[7].result as bigint) : 0,
     priceRatio: prs
       ? {
           start: prs.startFourthRootPriceRatio.toString(),

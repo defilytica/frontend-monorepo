@@ -18,9 +18,9 @@ export type PnlStatus =
   | 'computed'
   /** True pegged-asset pool (Stable / MetaStable / ComposableStable / FX).
    *  IL is vanishingly small by design; suppressed rather than shown as
-   *  0.00% which reads as a load bug. NOTE: reCLAMM and Gyro are NOT
-   *  included — they can host volatile pairs too, so IL must be computed
-   *  case-by-case. */
+   *  0.00% which reads as a load bug. NOTE: AutoRange (RECLAMM) and
+   *  Gyro are NOT included — they can host volatile pairs too, so IL
+   *  must be computed case-by-case. */
   | 'stable'
   /** No add events found for the position — either the indexer doesn't
    *  cover it, or BPTs were received via airdrop / migration. */

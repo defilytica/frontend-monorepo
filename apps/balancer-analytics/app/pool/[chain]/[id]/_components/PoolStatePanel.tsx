@@ -182,22 +182,34 @@ function WeightRows({
  */
 /**
  * Self-contained section card. Each section (Fee parameters, Permissions,
- * Weights, ECLP, reCLAMM, …) renders as its own free-standing Card so
+ * Weights, ECLP, AutoRange, …) renders as its own free-standing Card so
  * `PoolStatePanel` can lay them out in a `SimpleGrid` — independent
  * grouping, no single-column tower of rows, and visually obvious which
- * params belong together.
+ * params belong together. Sections with `wide` request the full row
+ * (both columns on `lg+`) — used for AutoRange where the distribution
+ * bar needs horizontal room to read clearly.
  */
 function TypeSection({
   title,
   badge,
+  wide,
   children,
 }: {
   title: string
   badge?: React.ReactNode
+  /** When true, the section spans both columns on `lg+`. Other breakpoints
+   *  are unaffected (the grid is already single-column on `base`/`md`). */
+  wide?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <Card h="full" overflow="hidden" p={{ base: 'md', md: 'md' }} variant="subSection">
+    <Card
+      gridColumn={wide ? { lg: 'span 2' } : undefined}
+      h="full"
+      overflow="hidden"
+      p={{ base: 'md', md: 'md' }}
+      variant="subSection"
+    >
       <VStack align="stretch" h="full" spacing="sm" w="full">
         <Flex align="center" justify="space-between">
           <Heading fontSize="md" variant="h4">
@@ -334,15 +346,279 @@ function GyroEclpSection({ eclp }: { eclp: GyroEclpTypeState }): React.JSX.Eleme
   )
 }
 
-function ReclammSection({
+// ── AutoRange math — margin balances in scaled-balance space ───────────
+//
+// Direct port of frontend-v3's `reclAmmMath.ts` (calculateLower/UpperMargin).
+// These compute the *balances* of token A at which centeredness equals the
+// configured margin from above and below; in price space (via `invariant /
+// balance²`) those map to the "low target" and "high target" edges of the
+// in-range green band on the distribution bar. Pure functions.
+function autoRangeLowerMarginBalance(
+  marginPercentage: number,
+  invariant: number,
+  vA: number,
+  vB: number
+): number {
+  const m = marginPercentage / 100
+  const b = vA + m * vA
+  const c = m * (vA * vA - (invariant * vA) / vB)
+  return vA + (-b + Math.sqrt(b * b - 4 * c)) / 2
+}
+function autoRangeUpperMarginBalance(
+  marginPercentage: number,
+  invariant: number,
+  vA: number,
+  vB: number
+): number {
+  const m = marginPercentage / 100
+  const b = (vA + m * vA) / m
+  const c = (vA * vA - (vA * invariant) / vB) / m
+  return vA + (-b + Math.sqrt(b * b - 4 * c)) / 2
+}
+
+const autoRangePriceFmt = (n: number): string => {
+  if (!Number.isFinite(n)) return '—'
+  return n.toLocaleString(undefined, { maximumSignificantDigits: 4 })
+}
+
+/**
+ * Concentrated-liquidity distribution bar. Three proportional segments
+ * across the full active range [min, max]:
+ *
+ *     [orange margin] [GREEN target] [orange margin]
+ *                            ●
+ *
+ * Each segment's width tracks the actual price gap it covers. A vertical
+ * marker overlays the current spot price; its color reflects status
+ * (green in target, orange in margin, red if the spot escapes [min,max]).
+ *
+ * Boundary labels live OUTSIDE this component — surfaced in the section
+ * card as a clean horizontal strip. Keeping the bar visualization-only
+ * is what makes it readable inside a card's tight footprint.
+ */
+function AutoRangeDistroBar({
+  minPrice,
+  lowTarget,
+  highTarget,
+  maxPrice,
+  spotPrice,
+  isInRange,
+}: {
+  minPrice: number
+  /** Lower edge of the green band ("Low target"). Comes from
+   *  `invariant / upperMarginBalance²`. */
+  lowTarget: number
+  /** Upper edge of the green band ("High target"). */
+  highTarget: number
+  maxPrice: number
+  spotPrice: number
+  isInRange: boolean
+}): React.JSX.Element {
+  const range = maxPrice - minPrice
+  const hasData =
+    Number.isFinite(minPrice) &&
+    Number.isFinite(maxPrice) &&
+    Number.isFinite(lowTarget) &&
+    Number.isFinite(highTarget) &&
+    range > 0 &&
+    lowTarget >= minPrice &&
+    highTarget <= maxPrice &&
+    lowTarget <= highTarget
+
+  const leftOrangeW = hasData ? ((lowTarget - minPrice) / range) * 100 : 100 / 3
+  const greenW = hasData ? ((highTarget - lowTarget) / range) * 100 : 100 / 3
+  const rightOrangeW = hasData ? ((maxPrice - highTarget) / range) * 100 : 100 / 3
+
+  const spotInside =
+    Number.isFinite(spotPrice) && spotPrice >= minPrice && spotPrice <= maxPrice
+  const spotPct = !Number.isFinite(spotPrice)
+    ? null
+    : spotPrice < minPrice
+      ? 0
+      : spotPrice > maxPrice
+        ? 100
+        : ((spotPrice - minPrice) / range) * 100
+
+  const markerColor = !spotInside
+    ? 'red.400'
+    : isInRange
+      ? 'green.300'
+      : 'orange.300'
+
+  return (
+    <Box h="36px" position="relative" w="full">
+      {/* The bar — taller (24px) so the colored segments read at a glance. */}
+      <Flex
+        borderColor="background.level0"
+        borderWidth="1px"
+        h="24px"
+        overflow="hidden"
+        position="absolute"
+        rounded="md"
+        top="6px"
+        w="full"
+      >
+        <Box
+          bgGradient="linear(to-b, orange.300, orange.500)"
+          h="full"
+          w={`${leftOrangeW}%`}
+        />
+        <Box
+          bgGradient="linear(to-b, green.300, green.500)"
+          h="full"
+          w={`${greenW}%`}
+        />
+        <Box
+          bgGradient="linear(to-b, orange.300, orange.500)"
+          h="full"
+          w={`${rightOrangeW}%`}
+        />
+      </Flex>
+      {/* Spot marker — a thin vertical line capped with a dot on top.
+          The dot's color signals status without needing text. */}
+      {spotPct !== null && (
+        <>
+          <Box
+            bg={markerColor}
+            boxShadow="0 0 0 1px var(--chakra-colors-background-level0)"
+            h="36px"
+            left={`${spotPct}%`}
+            position="absolute"
+            rounded="sm"
+            top="0"
+            transform="translateX(-50%)"
+            w="2px"
+            zIndex={1}
+          />
+          <Box
+            bg={markerColor}
+            border="2px solid"
+            borderColor="background.level0"
+            boxShadow="md"
+            h="10px"
+            left={`${spotPct}%`}
+            position="absolute"
+            rounded="full"
+            top="-2px"
+            transform="translateX(-50%)"
+            w="10px"
+            zIndex={2}
+          />
+        </>
+      )}
+    </Box>
+  )
+}
+
+/** Compact boundary chip — small "label · value" pair shown beneath the
+ *  distribution bar. Four of these line up in a SimpleGrid so prices are
+ *  readable at-a-glance without crowding the bar itself. */
+function BoundaryChip({
+  label,
+  value,
+  unit,
+  emphasis,
+}: {
+  label: string
+  value: number
+  unit: string
+  /** Spot price gets a colored value to match the bar's marker — every
+   *  other chip stays neutral so the spot is the visual lead. */
+  emphasis?: 'spot' | 'in-range' | 'out-of-range' | 'out-of-bounds'
+}): React.JSX.Element {
+  const valueColor =
+    emphasis === 'out-of-bounds'
+      ? 'red.400'
+      : emphasis === 'in-range'
+        ? 'green.300'
+        : emphasis === 'out-of-range'
+          ? 'orange.300'
+          : undefined
+  return (
+    <VStack align="flex-start" spacing="2xs">
+      <Text color="font.secondary" fontSize="xs">
+        {label}
+      </Text>
+      <HStack align="baseline" spacing="xs">
+        <Text color={valueColor} fontFamily="mono" fontSize="sm" fontWeight={500}>
+          {autoRangePriceFmt(value)}
+        </Text>
+        <Text color="font.secondary" fontSize="2xs">
+          {unit}
+        </Text>
+      </HStack>
+    </VStack>
+  )
+}
+
+function AutoRangeSection({
   rc,
+  tokens,
   manageButton,
 }: {
   rc: ReclammTypeState
+  /** Pool tokens in registration order — tokens[0] = A, tokens[1] = B.
+   *  Drives the unit label on the boundary chips (e.g. "USDC per WETH"). */
+  tokens: Token[]
   manageButton?: React.ReactNode
 }): React.JSX.Element {
   const updateActive =
     rc.priceRatio.endTime > 0 && rc.priceRatio.start !== rc.priceRatio.end
+
+  // Convert all contract values to plain numbers in their natural units.
+  // Live + virtual balances are 1e18-scaled by the Vault's internal
+  // accounting; descaling once at the boundary lets the math read like
+  // ordinary algebra. Centeredness margin is also 1e18-scaled; the math
+  // function expects percent units, so divide by 1e16.
+  const liveA = Number(rc.liveBalanceA) / 1e18
+  const liveB = Number(rc.liveBalanceB) / 1e18
+  const vA = Number(rc.virtualBalanceA) / 1e18
+  const vB = Number(rc.virtualBalanceB) / 1e18
+  const minPrice = Number(rc.minPrice) / 1e18
+  const maxPrice = Number(rc.maxPrice) / 1e18
+  const marginPct = Number(rc.centerednessMargin) / 1e16
+  // Derive spot from the AMM curve: for a 50/50 weighted pool, spot price
+  // (B per A) is `(liveB + virtualB) / (liveA + virtualA)`. Matches what
+  // frontend-v3 does — and reliably avoids the `computeCurrentSpotPrice`
+  // RPC call, which is absent on some older AutoRange deployments.
+  const totalA = liveA + vA
+  const totalB = liveB + vB
+  const spotPrice = totalA > 0 ? totalB / totalA : NaN
+
+  const invariant = (liveA + vA) * (liveB + vB)
+  const lowerMarginBal =
+    Number.isFinite(invariant) && vA > 0 && vB > 0 && marginPct > 0
+      ? autoRangeLowerMarginBalance(marginPct, invariant, vA, vB)
+      : NaN
+  const upperMarginBal =
+    Number.isFinite(invariant) && vA > 0 && vB > 0 && marginPct > 0
+      ? autoRangeUpperMarginBalance(marginPct, invariant, vA, vB)
+      : NaN
+  // Lower balance of A → higher price ("High target", upper edge of green
+  // band). Upper balance of A → lower price ("Low target", lower edge).
+  const highTargetPrice = Number.isFinite(lowerMarginBal)
+    ? invariant / (lowerMarginBal * lowerMarginBal)
+    : NaN
+  const lowTargetPrice = Number.isFinite(upperMarginBal)
+    ? invariant / (upperMarginBal * upperMarginBal)
+    : NaN
+
+  const symbolA = tokens[0]?.symbol ?? 'A'
+  const symbolB = tokens[1]?.symbol ?? 'B'
+  const unit = `${symbolB} / ${symbolA}`
+
+  const spotInside =
+    Number.isFinite(spotPrice) &&
+    Number.isFinite(minPrice) &&
+    Number.isFinite(maxPrice) &&
+    spotPrice >= minPrice &&
+    spotPrice <= maxPrice
+  const spotEmphasis: Parameters<typeof BoundaryChip>[0]['emphasis'] = !spotInside
+    ? 'out-of-bounds'
+    : rc.isWithinTargetRange
+      ? 'in-range'
+      : 'out-of-range'
+
   return (
     <TypeSection
       badge={
@@ -350,22 +626,61 @@ function ReclammSection({
           {rc.isWithinTargetRange ? 'in range' : 'out of range'}
         </Badge>
       }
-      title="reCLAMM"
+      title="AutoRange"
+      wide
     >
+      {/* Distribution bar — one big visual element, no labels on it. */}
+      <AutoRangeDistroBar
+        highTarget={highTargetPrice}
+        isInRange={rc.isWithinTargetRange}
+        lowTarget={lowTargetPrice}
+        maxPrice={maxPrice}
+        minPrice={minPrice}
+        spotPrice={spotPrice}
+      />
+
+      {/* Five boundary chips — Min · Low target · Spot · High target · Max.
+          SimpleGrid collapses to 3 columns on narrow widths so the spot
+          stays prominent on every breakpoint. */}
+      <SimpleGrid columns={{ base: 2, sm: 3, md: 5 }} spacing="sm" w="full">
+        <BoundaryChip label="Min" unit={unit} value={minPrice} />
+        <BoundaryChip label="Low target" unit={unit} value={lowTargetPrice} />
+        <BoundaryChip
+          emphasis={spotEmphasis}
+          label="Spot"
+          unit={unit}
+          value={spotPrice}
+        />
+        <BoundaryChip label="High target" unit={unit} value={highTargetPrice} />
+        <BoundaryChip label="Max" unit={unit} value={maxPrice} />
+      </SimpleGrid>
+
+      <Divider opacity={0.4} />
+
+      {/* Parameter rows — standard StateRow layout matches every other
+          section card so the page reads consistently. */}
       <StateRow
-        hint="current max/min price spread"
+        hint="ratio of max to min price"
         label="Price ratio"
         value={formatScaled(rc.currentPriceRatio)}
       />
       <StateRow
+        hint="threshold below which the pool starts shifting to recenter"
         label="Centeredness margin"
         value={formatWeightPct(rc.centerednessMargin)}
       />
       <StateRow
-        hint="max daily price-range drift"
+        hint="cap on daily drift of the bounds when out-of-center"
         label="Daily price shift"
         value={formatWeightPct(rc.dailyPriceShiftExponent)}
       />
+      {rc.lastTimestamp > 0 && (
+        <StateRow
+          hint="bounds only update on interactions"
+          label="Last interaction"
+          value={formatTimestamp(rc.lastTimestamp)}
+        />
+      )}
       {updateActive && (
         <>
           <StateRow
@@ -883,8 +1198,8 @@ export function PoolStatePanel({
   // ── Inline manage buttons (ops.balancer.fi payload builders) ────────
   // Previously these lived in a dedicated "Manage parameters" card;
   // pulled into the relevant section cards now (fee setter → Fee
-  // parameters, surge tuning → StableSurge hook, reCLAMM payload →
-  // reCLAMM) so the card grid stays compact and each action sits next
+  // parameters, surge tuning → StableSurge hook, AutoRange payload →
+  // AutoRange) so the card grid stays compact and each action sits next
   // to the values it changes.
   const opsNetwork = poolDetail.chain.toLowerCase()
   // All four payload builders below now accept `?network=&pool=` query
@@ -917,11 +1232,13 @@ export function PoolStatePanel({
       }}
     />
   ) : null
-  const reclammManageButton = state.reclamm ? (
+  const autoRangeManageButton = state.reclamm ? (
     <ManageButton
       link={{
-        label: 'Manage reCLAMM',
-        hint: 'reCLAMM payload builder',
+        label: 'Manage AutoRange',
+        // ops.balancer.fi's product is "AutoRange" but the live route is
+        // still /payload-builder/reclamm (the /autorange slug 404s).
+        hint: 'AutoRange payload builder',
         href: `${OPS_BASE}/payload-builder/reclamm${opsQuery}`,
       }}
     />
@@ -976,7 +1293,11 @@ export function PoolStatePanel({
     typeSpecificCard = <GyroEclpSection eclp={state.gyroEclp} />
   } else if (state.reclamm) {
     typeSpecificCard = (
-      <ReclammSection manageButton={reclammManageButton} rc={state.reclamm} />
+      <AutoRangeSection
+        manageButton={autoRangeManageButton}
+        rc={state.reclamm}
+        tokens={poolDetail.tokens}
+      />
     )
   } else if (state.lbp) {
     typeSpecificCard = <LbpSection lbp={state.lbp} tokens={poolDetail.tokens} />
@@ -1018,7 +1339,7 @@ export function PoolStatePanel({
       {/* Section cards — each is a peer in the 2-col grid. Manage
           actions live inside the section they affect rather than in a
           separate Manage card (fee setter → Fee parameters; surge
-          tuning → StableSurge hook; reCLAMM payload → reCLAMM). */}
+          tuning → StableSurge hook; AutoRange payload → AutoRange). */}
       <SimpleGrid columns={{ base: 1, lg: 2 }} spacing="md" w="full">
         {u && (
           <TypeSection title="Fee parameters">
