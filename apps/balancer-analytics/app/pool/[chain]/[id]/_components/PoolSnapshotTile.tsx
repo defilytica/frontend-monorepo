@@ -2,11 +2,17 @@
 
 /**
  * Left half of the pool-detail bento — at-a-glance metrics that mirror
- * frontend-v3's `PoolSnapshot`. TVL, 24h volume, 24h fees, pool age,
- * with a small delta pill on TVL (latest vs the snapshot ~24h prior).
+ * frontend-v3's `PoolSnapshot`, but range-aware: the headline numbers
+ * track whatever range the chart toggle is showing, not just the latest
+ * 24h. The chart's `?range=` parameter is the single source of truth;
+ * this tile reads the same trimmed `snapshots` array.
  *
- * Reads from the same `PoolPageData['snapshots']` array the chart
- * consumes — no extra fetch.
+ * Per-metric semantics under the active range:
+ *   - TVL: current value (stock, not flow). Delta compares latest vs
+ *     the first snapshot in the range (so 30d → "TVL +5.2% vs 30d ago").
+ *   - Volume / Fees / Surplus: total across the range (flows summed).
+ *   - Surplus row replaces Fees on CowAmm pools — CoW pools earn
+ *     surplus instead of swap fees.
  */
 
 import {
@@ -20,10 +26,9 @@ import {
   type StackProps,
 } from '@chakra-ui/react'
 import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
-import type { PoolPageData } from '../page'
+import type { PoolHistoryRange, PoolPageData } from '../page'
 import { getEventStyle } from './eventStyles'
 
-type Snap = PoolPageData['snapshots'][number]
 type Ev = PoolPageData['events'][number]
 
 const usdCompact = (n: number) =>
@@ -36,6 +41,27 @@ const usdCompact = (n: number) =>
 
 // Uniform compact format keeps the tile fits-on-260px clean: even a
 // $1.5B pool reads as "$1.5B" rather than "$1,500,000,000".
+
+/** Short label for the range — appears in metric titles ("Volume (30d)").
+ *  "all-time" reads natural in copy; the chart toggle's literal "all" would
+ *  parse oddly as a metric label. */
+const RANGE_LABEL: Record<PoolHistoryRange, string> = {
+  '30d': '30d',
+  '90d': '90d',
+  '180d': '180d',
+  '1y': '1y',
+  all: 'all-time',
+}
+
+/** Human-readable phrasing for the TVL delta hint — "vs 30 days ago" reads
+ *  better than "vs 30d ago" at the small caption size. */
+const RANGE_DELTA_HINT: Record<PoolHistoryRange, string> = {
+  '30d': 'vs 30 days ago',
+  '90d': 'vs 90 days ago',
+  '180d': 'vs 180 days ago',
+  '1y': 'vs 1 year ago',
+  all: 'since pool creation',
+}
 
 function deltaPct(curr: number, prev: number): number | null {
   if (!Number.isFinite(curr) || !Number.isFinite(prev) || prev <= 0) return null
@@ -135,31 +161,47 @@ function LastChangeRow({ event }: { event: Ev | null }): React.JSX.Element {
 export function PoolSnapshotTile({
   snapshots,
   events,
+  range,
+  poolType,
   ...stackProps
 }: {
   snapshots: PoolPageData['snapshots']
   events: PoolPageData['events']
+  /** Active chart range — drives metric labels + the range over which
+   *  volume/fees/surplus are summed. The page-level `data.snapshots` is
+   *  already trimmed to this range, so summing here just walks the
+   *  prop. */
+  range: PoolHistoryRange
+  /** Pool type from api-v3 (e.g. `COW_AMM`, `WEIGHTED`, `STABLE`). Drives
+   *  the Fees-vs-Surplus dispatch — CowAmm pools earn surplus instead of
+   *  swap fees, so showing zero fees on those is misleading. */
+  poolType: string
 } & StackProps): React.JSX.Element {
   const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp)
   const latest = sorted.at(-1)
-  // ~24h prior snapshot — for cron-fed daily series this is sorted[len-2].
-  // For hourly series (rare here), walk back to find ts ≤ latest-86400.
-  let prev: Snap | undefined
-  if (latest) {
-    const target = latest.timestamp - 86400
-    for (let i = sorted.length - 2; i >= 0; i--) {
-      if (sorted[i].timestamp <= target) {
-        prev = sorted[i]
-        break
-      }
-    }
-    if (!prev) prev = sorted.at(-2)
-  }
+  const first = sorted.at(0)
 
   const tvl = latest?.totalLiquidity ?? 0
-  const tvlDelta = prev ? deltaPct(tvl, prev.totalLiquidity) : null
-  const vol = latest?.volume24h ?? 0
-  const fees = latest?.fees24h ?? 0
+  // Range-aware delta — compare latest snapshot's TVL to the oldest
+  // snapshot in the active window. If there's only one snapshot we
+  // surface no delta (no comparison point).
+  const tvlDelta =
+    first && latest && first !== latest ? deltaPct(tvl, first.totalLiquidity) : null
+
+  // Range totals — sum the flows across every snapshot we hold. The
+  // 30d view trims to ~30 daily snapshots; "all" gives the full series.
+  let volumeTotal = 0
+  let feesTotal = 0
+  let surplusTotal = 0
+  for (const s of sorted) {
+    volumeTotal += s.volume24h
+    feesTotal += s.fees24h
+    surplusTotal += s.surplus24h
+  }
+
+  const isCowAmm = poolType === 'COW_AMM'
+  const rangeLabel = RANGE_LABEL[range]
+  const deltaHint = RANGE_DELTA_HINT[range]
 
   // Latest tracked param event (max blockTimestamp). Stable+amp pools can
   // have multiple events at the same block — break ties on logIndex too.
@@ -191,19 +233,28 @@ export function PoolSnapshotTile({
           <Heading size="h5">Metrics</Heading>
           <MetricRow
             delta={tvlDelta}
+            hint={deltaHint}
             label="TVL"
             value={usdCompact(tvl)}
           />
           <MetricRow
-            hint="latest snapshot"
-            label="Volume (24h)"
-            value={usdCompact(vol)}
+            hint={`total ${rangeLabel}`}
+            label="Volume"
+            value={usdCompact(volumeTotal)}
           />
-          <MetricRow
-            hint="latest snapshot"
-            label="Fees (24h)"
-            value={usdCompact(fees)}
-          />
+          {isCowAmm ? (
+            <MetricRow
+              hint={`total ${rangeLabel}`}
+              label="Surplus"
+              value={usdCompact(surplusTotal)}
+            />
+          ) : (
+            <MetricRow
+              hint={`total ${rangeLabel}`}
+              label="Fees"
+              value={usdCompact(feesTotal)}
+            />
+          )}
           <LastChangeRow event={lastEvent} />
         </Stack>
       </NoisyCard>

@@ -442,7 +442,7 @@ function pickFilterBEvents(metadata: PoolMetadata): readonly unknown[] {
   if (metadata.protocolVersion === 3) {
     if (t === 'STABLE') return V3_STABLE_FILTER_B_EVENTS
     // Other V3 types currently have no Filter B events (Weighted is
-    // immutable; ECLP / reCLAMM / LBP will be added in later phases).
+    // immutable; ECLP / AutoRange / LBP will be added in later phases).
     return []
   }
   if (metadata.protocolVersion === 2) {

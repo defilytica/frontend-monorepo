@@ -17,6 +17,7 @@ import {
 import Link from 'next/link'
 import { ArrowUpRight } from 'react-feather'
 import type {
+  BufferState,
   GyroEclpTypeState,
   LbpTypeState,
   QuantAmmTypeState,
@@ -25,7 +26,7 @@ import type {
   StableTypeState,
   WeightedTypeState,
 } from '@analytics/lib/pool-state/read'
-import type { PoolPageData } from '../page'
+import type { PoolDetailToken, PoolPageData } from '../page'
 
 // Block-explorer URL stems per chain (mirrors the per-chain map in
 // PoolEventLog so the analytics surface uses one address-link target).
@@ -181,22 +182,34 @@ function WeightRows({
  */
 /**
  * Self-contained section card. Each section (Fee parameters, Permissions,
- * Weights, ECLP, reCLAMM, …) renders as its own free-standing Card so
+ * Weights, ECLP, AutoRange, …) renders as its own free-standing Card so
  * `PoolStatePanel` can lay them out in a `SimpleGrid` — independent
  * grouping, no single-column tower of rows, and visually obvious which
- * params belong together.
+ * params belong together. Sections with `wide` request the full row
+ * (both columns on `lg+`) — used for AutoRange where the distribution
+ * bar needs horizontal room to read clearly.
  */
 function TypeSection({
   title,
   badge,
+  wide,
   children,
 }: {
   title: string
   badge?: React.ReactNode
+  /** When true, the section spans both columns on `lg+`. Other breakpoints
+   *  are unaffected (the grid is already single-column on `base`/`md`). */
+  wide?: boolean
   children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <Card h="full" overflow="hidden" p={{ base: 'md', md: 'md' }} variant="subSection">
+    <Card
+      gridColumn={wide ? { lg: 'span 2' } : undefined}
+      h="full"
+      overflow="hidden"
+      p={{ base: 'md', md: 'md' }}
+      variant="subSection"
+    >
       <VStack align="stretch" h="full" spacing="sm" w="full">
         <Flex align="center" justify="space-between">
           <Heading fontSize="md" variant="h4">
@@ -333,15 +346,279 @@ function GyroEclpSection({ eclp }: { eclp: GyroEclpTypeState }): React.JSX.Eleme
   )
 }
 
-function ReclammSection({
+// ── AutoRange math — margin balances in scaled-balance space ───────────
+//
+// Direct port of frontend-v3's `reclAmmMath.ts` (calculateLower/UpperMargin).
+// These compute the *balances* of token A at which centeredness equals the
+// configured margin from above and below; in price space (via `invariant /
+// balance²`) those map to the "low target" and "high target" edges of the
+// in-range green band on the distribution bar. Pure functions.
+function autoRangeLowerMarginBalance(
+  marginPercentage: number,
+  invariant: number,
+  vA: number,
+  vB: number
+): number {
+  const m = marginPercentage / 100
+  const b = vA + m * vA
+  const c = m * (vA * vA - (invariant * vA) / vB)
+  return vA + (-b + Math.sqrt(b * b - 4 * c)) / 2
+}
+function autoRangeUpperMarginBalance(
+  marginPercentage: number,
+  invariant: number,
+  vA: number,
+  vB: number
+): number {
+  const m = marginPercentage / 100
+  const b = (vA + m * vA) / m
+  const c = (vA * vA - (vA * invariant) / vB) / m
+  return vA + (-b + Math.sqrt(b * b - 4 * c)) / 2
+}
+
+const autoRangePriceFmt = (n: number): string => {
+  if (!Number.isFinite(n)) return '—'
+  return n.toLocaleString(undefined, { maximumSignificantDigits: 4 })
+}
+
+/**
+ * Concentrated-liquidity distribution bar. Three proportional segments
+ * across the full active range [min, max]:
+ *
+ *     [orange margin] [GREEN target] [orange margin]
+ *                            ●
+ *
+ * Each segment's width tracks the actual price gap it covers. A vertical
+ * marker overlays the current spot price; its color reflects status
+ * (green in target, orange in margin, red if the spot escapes [min,max]).
+ *
+ * Boundary labels live OUTSIDE this component — surfaced in the section
+ * card as a clean horizontal strip. Keeping the bar visualization-only
+ * is what makes it readable inside a card's tight footprint.
+ */
+function AutoRangeDistroBar({
+  minPrice,
+  lowTarget,
+  highTarget,
+  maxPrice,
+  spotPrice,
+  isInRange,
+}: {
+  minPrice: number
+  /** Lower edge of the green band ("Low target"). Comes from
+   *  `invariant / upperMarginBalance²`. */
+  lowTarget: number
+  /** Upper edge of the green band ("High target"). */
+  highTarget: number
+  maxPrice: number
+  spotPrice: number
+  isInRange: boolean
+}): React.JSX.Element {
+  const range = maxPrice - minPrice
+  const hasData =
+    Number.isFinite(minPrice) &&
+    Number.isFinite(maxPrice) &&
+    Number.isFinite(lowTarget) &&
+    Number.isFinite(highTarget) &&
+    range > 0 &&
+    lowTarget >= minPrice &&
+    highTarget <= maxPrice &&
+    lowTarget <= highTarget
+
+  const leftOrangeW = hasData ? ((lowTarget - minPrice) / range) * 100 : 100 / 3
+  const greenW = hasData ? ((highTarget - lowTarget) / range) * 100 : 100 / 3
+  const rightOrangeW = hasData ? ((maxPrice - highTarget) / range) * 100 : 100 / 3
+
+  const spotInside =
+    Number.isFinite(spotPrice) && spotPrice >= minPrice && spotPrice <= maxPrice
+  const spotPct = !Number.isFinite(spotPrice)
+    ? null
+    : spotPrice < minPrice
+      ? 0
+      : spotPrice > maxPrice
+        ? 100
+        : ((spotPrice - minPrice) / range) * 100
+
+  const markerColor = !spotInside
+    ? 'red.400'
+    : isInRange
+      ? 'green.300'
+      : 'orange.300'
+
+  return (
+    <Box h="36px" position="relative" w="full">
+      {/* The bar — taller (24px) so the colored segments read at a glance. */}
+      <Flex
+        borderColor="background.level0"
+        borderWidth="1px"
+        h="24px"
+        overflow="hidden"
+        position="absolute"
+        rounded="md"
+        top="6px"
+        w="full"
+      >
+        <Box
+          bgGradient="linear(to-b, orange.300, orange.500)"
+          h="full"
+          w={`${leftOrangeW}%`}
+        />
+        <Box
+          bgGradient="linear(to-b, green.300, green.500)"
+          h="full"
+          w={`${greenW}%`}
+        />
+        <Box
+          bgGradient="linear(to-b, orange.300, orange.500)"
+          h="full"
+          w={`${rightOrangeW}%`}
+        />
+      </Flex>
+      {/* Spot marker — a thin vertical line capped with a dot on top.
+          The dot's color signals status without needing text. */}
+      {spotPct !== null && (
+        <>
+          <Box
+            bg={markerColor}
+            boxShadow="0 0 0 1px var(--chakra-colors-background-level0)"
+            h="36px"
+            left={`${spotPct}%`}
+            position="absolute"
+            rounded="sm"
+            top="0"
+            transform="translateX(-50%)"
+            w="2px"
+            zIndex={1}
+          />
+          <Box
+            bg={markerColor}
+            border="2px solid"
+            borderColor="background.level0"
+            boxShadow="md"
+            h="10px"
+            left={`${spotPct}%`}
+            position="absolute"
+            rounded="full"
+            top="-2px"
+            transform="translateX(-50%)"
+            w="10px"
+            zIndex={2}
+          />
+        </>
+      )}
+    </Box>
+  )
+}
+
+/** Compact boundary chip — small "label · value" pair shown beneath the
+ *  distribution bar. Four of these line up in a SimpleGrid so prices are
+ *  readable at-a-glance without crowding the bar itself. */
+function BoundaryChip({
+  label,
+  value,
+  unit,
+  emphasis,
+}: {
+  label: string
+  value: number
+  unit: string
+  /** Spot price gets a colored value to match the bar's marker — every
+   *  other chip stays neutral so the spot is the visual lead. */
+  emphasis?: 'spot' | 'in-range' | 'out-of-range' | 'out-of-bounds'
+}): React.JSX.Element {
+  const valueColor =
+    emphasis === 'out-of-bounds'
+      ? 'red.400'
+      : emphasis === 'in-range'
+        ? 'green.300'
+        : emphasis === 'out-of-range'
+          ? 'orange.300'
+          : undefined
+  return (
+    <VStack align="flex-start" spacing="2xs">
+      <Text color="font.secondary" fontSize="xs">
+        {label}
+      </Text>
+      <HStack align="baseline" spacing="xs">
+        <Text color={valueColor} fontFamily="mono" fontSize="sm" fontWeight={500}>
+          {autoRangePriceFmt(value)}
+        </Text>
+        <Text color="font.secondary" fontSize="2xs">
+          {unit}
+        </Text>
+      </HStack>
+    </VStack>
+  )
+}
+
+function AutoRangeSection({
   rc,
+  tokens,
   manageButton,
 }: {
   rc: ReclammTypeState
+  /** Pool tokens in registration order — tokens[0] = A, tokens[1] = B.
+   *  Drives the unit label on the boundary chips (e.g. "USDC per WETH"). */
+  tokens: Token[]
   manageButton?: React.ReactNode
 }): React.JSX.Element {
   const updateActive =
     rc.priceRatio.endTime > 0 && rc.priceRatio.start !== rc.priceRatio.end
+
+  // Convert all contract values to plain numbers in their natural units.
+  // Live + virtual balances are 1e18-scaled by the Vault's internal
+  // accounting; descaling once at the boundary lets the math read like
+  // ordinary algebra. Centeredness margin is also 1e18-scaled; the math
+  // function expects percent units, so divide by 1e16.
+  const liveA = Number(rc.liveBalanceA) / 1e18
+  const liveB = Number(rc.liveBalanceB) / 1e18
+  const vA = Number(rc.virtualBalanceA) / 1e18
+  const vB = Number(rc.virtualBalanceB) / 1e18
+  const minPrice = Number(rc.minPrice) / 1e18
+  const maxPrice = Number(rc.maxPrice) / 1e18
+  const marginPct = Number(rc.centerednessMargin) / 1e16
+  // Derive spot from the AMM curve: for a 50/50 weighted pool, spot price
+  // (B per A) is `(liveB + virtualB) / (liveA + virtualA)`. Matches what
+  // frontend-v3 does — and reliably avoids the `computeCurrentSpotPrice`
+  // RPC call, which is absent on some older AutoRange deployments.
+  const totalA = liveA + vA
+  const totalB = liveB + vB
+  const spotPrice = totalA > 0 ? totalB / totalA : NaN
+
+  const invariant = (liveA + vA) * (liveB + vB)
+  const lowerMarginBal =
+    Number.isFinite(invariant) && vA > 0 && vB > 0 && marginPct > 0
+      ? autoRangeLowerMarginBalance(marginPct, invariant, vA, vB)
+      : NaN
+  const upperMarginBal =
+    Number.isFinite(invariant) && vA > 0 && vB > 0 && marginPct > 0
+      ? autoRangeUpperMarginBalance(marginPct, invariant, vA, vB)
+      : NaN
+  // Lower balance of A → higher price ("High target", upper edge of green
+  // band). Upper balance of A → lower price ("Low target", lower edge).
+  const highTargetPrice = Number.isFinite(lowerMarginBal)
+    ? invariant / (lowerMarginBal * lowerMarginBal)
+    : NaN
+  const lowTargetPrice = Number.isFinite(upperMarginBal)
+    ? invariant / (upperMarginBal * upperMarginBal)
+    : NaN
+
+  const symbolA = tokens[0]?.symbol ?? 'A'
+  const symbolB = tokens[1]?.symbol ?? 'B'
+  const unit = `${symbolB} / ${symbolA}`
+
+  const spotInside =
+    Number.isFinite(spotPrice) &&
+    Number.isFinite(minPrice) &&
+    Number.isFinite(maxPrice) &&
+    spotPrice >= minPrice &&
+    spotPrice <= maxPrice
+  const spotEmphasis: Parameters<typeof BoundaryChip>[0]['emphasis'] = !spotInside
+    ? 'out-of-bounds'
+    : rc.isWithinTargetRange
+      ? 'in-range'
+      : 'out-of-range'
+
   return (
     <TypeSection
       badge={
@@ -349,22 +626,61 @@ function ReclammSection({
           {rc.isWithinTargetRange ? 'in range' : 'out of range'}
         </Badge>
       }
-      title="reCLAMM"
+      title="AutoRange"
+      wide
     >
+      {/* Distribution bar — one big visual element, no labels on it. */}
+      <AutoRangeDistroBar
+        highTarget={highTargetPrice}
+        isInRange={rc.isWithinTargetRange}
+        lowTarget={lowTargetPrice}
+        maxPrice={maxPrice}
+        minPrice={minPrice}
+        spotPrice={spotPrice}
+      />
+
+      {/* Five boundary chips — Min · Low target · Spot · High target · Max.
+          SimpleGrid collapses to 3 columns on narrow widths so the spot
+          stays prominent on every breakpoint. */}
+      <SimpleGrid columns={{ base: 2, sm: 3, md: 5 }} spacing="sm" w="full">
+        <BoundaryChip label="Min" unit={unit} value={minPrice} />
+        <BoundaryChip label="Low target" unit={unit} value={lowTargetPrice} />
+        <BoundaryChip
+          emphasis={spotEmphasis}
+          label="Spot"
+          unit={unit}
+          value={spotPrice}
+        />
+        <BoundaryChip label="High target" unit={unit} value={highTargetPrice} />
+        <BoundaryChip label="Max" unit={unit} value={maxPrice} />
+      </SimpleGrid>
+
+      <Divider opacity={0.4} />
+
+      {/* Parameter rows — standard StateRow layout matches every other
+          section card so the page reads consistently. */}
       <StateRow
-        hint="current max/min price spread"
+        hint="ratio of max to min price"
         label="Price ratio"
         value={formatScaled(rc.currentPriceRatio)}
       />
       <StateRow
+        hint="threshold below which the pool starts shifting to recenter"
         label="Centeredness margin"
         value={formatWeightPct(rc.centerednessMargin)}
       />
       <StateRow
-        hint="max daily price-range drift"
+        hint="cap on daily drift of the bounds when out-of-center"
         label="Daily price shift"
         value={formatWeightPct(rc.dailyPriceShiftExponent)}
       />
+      {rc.lastTimestamp > 0 && (
+        <StateRow
+          hint="bounds only update on interactions"
+          label="Last interaction"
+          value={formatTimestamp(rc.lastTimestamp)}
+        />
+      )}
       {updateActive && (
         <>
           <StateRow
@@ -459,15 +775,216 @@ function QuantAmmSection({
   )
 }
 
+// ── StableSurge math — derives "is surging?" + estimated fee ─────────────
+//
+// Port of `calculateStableSurgeBalanceMetrics` from balancer-ops-frontend
+// (commit 67fefe1, lib/utils/calculateStableSurgeBalanceMetrics.ts). The
+// algorithm is pure client-side derivation from per-token `balanceUSD`
+// shares + the hook's threshold/max-fee params — no extra RPC reads.
+type SurgeMetrics = {
+  /** Per-token TVL share, in percent (0–100). */
+  tokenPercentages: { symbol: string; pct: number }[]
+  /** Reference centroid used to compute deviations. For 2-token pools this
+   *  is always 50; for 3+ tokens it's the median of the per-token shares
+   *  (matches ops behavior — `median` is more robust than `mean` against a
+   *  single outlier token blowing up the imbalance signal). */
+  median: number
+  /** Sum of absolute deviations from the median, in percentage points. */
+  totalImbalance: number
+  /** Hook threshold expressed in percentage points (5e16 wei → 5). */
+  surgeThresholdPct: number
+  /** Hook max swap fee expressed in percentage points. */
+  maxSurgeFeePct: number
+  /** True when totalImbalance has crossed the threshold — pool charges
+   *  a higher swap fee in this state. */
+  isInSurgeMode: boolean
+  /** Linear estimate of the current dynamic swap fee. Zero when not
+   *  surging; ramps from 0 → maxSurgeFee as the imbalance overshoots
+   *  the threshold by 0 → 100% (clamped). */
+  estimatedSurgeFeePct: number
+}
+
+function computeSurgeMetrics(
+  ss: StableSurgeState,
+  tokens: PoolDetailToken[]
+): SurgeMetrics {
+  let tvl = 0
+  const balancesUsd = tokens.map(t => {
+    const b = Number(t.balanceUSD) || 0
+    tvl += b
+    return b
+  })
+  const tokenPercentages = balancesUsd.map((b, i) => ({
+    symbol: tokens[i].symbol,
+    pct: tvl > 0 ? (b / tvl) * 100 : 0,
+  }))
+
+  let median: number
+  if (tokens.length === 2) {
+    median = 50
+  } else {
+    const sorted = tokenPercentages.map(t => t.pct).sort((a, b) => a - b)
+    const mid = Math.floor(sorted.length / 2)
+    median =
+      sorted.length === 0
+        ? 0
+        : sorted.length % 2 === 0
+          ? (sorted[mid - 1] + sorted[mid]) / 2
+          : sorted[mid]
+  }
+
+  const totalImbalance = tokenPercentages.reduce(
+    (acc, t) => acc + Math.abs(t.pct - median),
+    0
+  )
+  const surgeThresholdPct = (Number(ss.surgeThresholdPercentage) / 1e18) * 100
+  const maxSurgeFeePct = (Number(ss.maxSurgeFeePercentage) / 1e18) * 100
+  const isInSurgeMode = totalImbalance > surgeThresholdPct
+
+  let estimatedSurgeFeePct = 0
+  if (isInSurgeMode && surgeThresholdPct > 0) {
+    const intensity = Math.min(
+      (totalImbalance - surgeThresholdPct) / surgeThresholdPct,
+      1
+    )
+    estimatedSurgeFeePct = intensity * maxSurgeFeePct
+  }
+
+  return {
+    tokenPercentages,
+    median,
+    totalImbalance,
+    surgeThresholdPct,
+    maxSurgeFeePct,
+    isInSurgeMode,
+    estimatedSurgeFeePct,
+  }
+}
+
+/** Horizontal imbalance gauge — green zone up to threshold, red zone past
+ *  it. Marker shows the current totalImbalance position. Scale auto-sizes
+ *  so the threshold + current marker always sit in a readable region of
+ *  the bar (a 5% threshold doesn't get visually squashed against the left
+ *  edge of a 0–100% track). */
+function SurgeImbalanceBar({
+  imbalance,
+  threshold,
+  isInSurgeMode,
+}: {
+  imbalance: number
+  threshold: number
+  isInSurgeMode: boolean
+}): React.JSX.Element {
+  // Scale so the bar's right edge is comfortably past whichever is bigger
+  // — the threshold or the current imbalance — but never under 10 (so a
+  // tiny threshold like 1% still has visible resolution).
+  const scaleMax = Math.max(threshold * 3, imbalance * 1.2, 10)
+  const thresholdPos = Math.min((threshold / scaleMax) * 100, 100)
+  const currentPos = Math.min((imbalance / scaleMax) * 100, 100)
+  const markerColor = isInSurgeMode ? 'red.400' : 'green.300'
+  return (
+    <VStack align="stretch" spacing="2xs" w="full">
+      <Box h="14px" position="relative" w="full">
+        <Flex
+          borderColor="background.level0"
+          borderWidth="1px"
+          h="10px"
+          overflow="hidden"
+          position="absolute"
+          rounded="sm"
+          top="2px"
+          w="full"
+        >
+          <Box
+            bgGradient="linear(to-b, green.300, green.500)"
+            h="full"
+            w={`${thresholdPos}%`}
+          />
+          <Box
+            bgGradient="linear(to-b, red.300, red.500)"
+            h="full"
+            w={`${100 - thresholdPos}%`}
+          />
+        </Flex>
+        {/* Marker — vertical pill at the current imbalance position. */}
+        <Box
+          bg={markerColor}
+          boxShadow="0 0 0 1px var(--chakra-colors-background-level0)"
+          h="14px"
+          left={`${currentPos}%`}
+          position="absolute"
+          rounded="sm"
+          top="0"
+          transform="translateX(-50%)"
+          w="3px"
+          zIndex={1}
+        />
+      </Box>
+      <Flex justify="space-between">
+        <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          0%
+        </Text>
+        <Text color="orange.300" fontFamily="mono" fontSize="2xs">
+          threshold {threshold.toFixed(2)}%
+        </Text>
+        <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          {scaleMax.toFixed(0)}%
+        </Text>
+      </Flex>
+    </VStack>
+  )
+}
+
 function StableSurgeSection({
   ss,
+  tokens,
   manageButton,
 }: {
   ss: StableSurgeState
+  /** Pool tokens with `balanceUSD` populated — used to derive the
+   *  current per-token shares the hook compares against the threshold. */
+  tokens: PoolDetailToken[]
   manageButton?: React.ReactNode
 }): React.JSX.Element {
+  const m = computeSurgeMetrics(ss, tokens)
+  const deviationFmt = (n: number) =>
+    `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
+
   return (
-    <TypeSection title="StableSurge hook">
+    <TypeSection
+      badge={
+        <Badge colorScheme={m.isInSurgeMode ? 'red' : 'green'} size="sm">
+          {m.isInSurgeMode ? 'surging' : 'stable'}
+        </Badge>
+      }
+      title="StableSurge hook"
+    >
+      <StateRow
+        hint="sum of absolute token-share deviations from the median"
+        label="Current imbalance"
+        value={
+          <VStack align="stretch" spacing="xs" w="full">
+            <HStack align="baseline" spacing="sm">
+              <Text
+                color={m.isInSurgeMode ? 'red.300' : 'font.primary'}
+                fontFamily="mono"
+                fontSize="md"
+                fontWeight={600}
+              >
+                {m.totalImbalance.toFixed(2)}%
+              </Text>
+              <Text color="font.secondary" fontFamily="mono" fontSize="xs">
+                vs threshold {m.surgeThresholdPct.toFixed(2)}%
+              </Text>
+            </HStack>
+            <SurgeImbalanceBar
+              imbalance={m.totalImbalance}
+              isInSurgeMode={m.isInSurgeMode}
+              threshold={m.surgeThresholdPct}
+            />
+          </VStack>
+        }
+      />
       <StateRow
         hint="imbalance above which surge applies"
         label="Surge threshold"
@@ -478,6 +995,322 @@ function StableSurgeSection({
         label="Max surge fee"
         value={formatPercent(ss.maxSurgeFeePercentage)}
       />
+      {m.isInSurgeMode && (
+        <StateRow
+          hint="current dynamic swap fee derived from how far past the threshold the imbalance is"
+          label="Estimated surge fee"
+          value={
+            <Text color="red.300" fontFamily="mono" fontSize="sm" fontWeight={600}>
+              {m.estimatedSurgeFeePct.toFixed(3)}%
+            </Text>
+          }
+        />
+      )}
+      <Divider opacity={0.4} />
+      <Box>
+        <Text color="font.secondary" fontSize="xs" mb="xs">
+          Balance distribution
+        </Text>
+        <VStack align="stretch" spacing="2xs" w="full">
+          {m.tokenPercentages.map((t, i) => {
+            const dev = t.pct - m.median
+            const devAbs = Math.abs(dev)
+            // Color the deviation if it's a meaningful contributor to imbalance.
+            // Use the threshold as the "this matters" yardstick — a deviation
+            // larger than the threshold is by definition pushing the pool
+            // toward surge.
+            const devColor =
+              devAbs >= m.surgeThresholdPct ? 'red.300' : devAbs >= 1 ? 'orange.300' : 'font.secondary'
+            return (
+              <HStack justify="space-between" key={i} spacing="sm" w="full">
+                <Text fontFamily="mono" fontSize="sm">
+                  {t.symbol}
+                </Text>
+                <HStack spacing="md">
+                  <Text fontFamily="mono" fontSize="sm">
+                    {t.pct.toFixed(2)}%
+                  </Text>
+                  <Text color={devColor} fontFamily="mono" fontSize="xs" minW="60px" textAlign="right">
+                    {deviationFmt(dev)}
+                  </Text>
+                </HStack>
+              </HStack>
+            )
+          })}
+        </VStack>
+      </Box>
+      {manageButton}
+    </TypeSection>
+  )
+}
+
+// ── ERC4626 buffer section ─────────────────────────────────────────────
+//
+// One TypeSection per wrapped token. Each surfaces the Vault buffer's
+// internal composition (underlying vs wrapped held by the buffer) plus
+// the ERC4626 wrapper's own deposit/withdraw caps — both pieces are
+// "current state" of how the pool can route swaps through this token.
+
+const tokenCompact = new Intl.NumberFormat('en-US', {
+  notation: 'compact',
+  maximumFractionDigits: 2,
+})
+
+function formatTokenCompact(amount: number): string {
+  if (!Number.isFinite(amount)) return '—'
+  if (amount === 0) return '0'
+  return tokenCompact.format(amount)
+}
+
+function parseNum(s: string | null | undefined): number {
+  if (s == null) return NaN
+  const n = Number(s)
+  return Number.isFinite(n) ? n : NaN
+}
+
+/** Convert a raw u256 string to a human number using `decimals`. Loses
+ *  precision past 2^53 but the display values we surface (USD-stable-
+ *  pool buffers, ETH-likes) live well below that ceiling. */
+function rawToHuman(raw: string | null, decimals: number): number {
+  if (!raw || decimals < 0 || !Number.isFinite(decimals)) return NaN
+  try {
+    return Number(BigInt(raw)) / 10 ** decimals
+  } catch {
+    return NaN
+  }
+}
+
+/** Tight horizontal capacity bar — fits inside a StateRow value column.
+ *  Shows what fraction of the wrapper's cap the pool's current position
+ *  occupies, with a small percentage readout above and the cap value
+ *  beneath. Red when the pool position exceeds the cap (a full one-shot
+ *  unwind would not fit). */
+function CapacityBar({
+  positionLabel,
+  position,
+  cap,
+  unit,
+}: {
+  positionLabel: string
+  position: number
+  cap: number
+  unit: string
+}): React.JSX.Element {
+  const hasData = Number.isFinite(position) && Number.isFinite(cap) && cap >= 0
+  const overflow = hasData && cap > 0 ? position > cap : false
+  const pct = !hasData
+    ? 0
+    : cap <= 0
+      ? position > 0
+        ? 100
+        : 0
+      : Math.min((position / cap) * 100, 100)
+  return (
+    <VStack align="stretch" spacing="2xs" w="full">
+      <Flex align="center" justify="space-between">
+        <Text color={overflow ? 'red.400' : 'font.secondary'} fontFamily="mono" fontSize="xs">
+          {hasData ? `${pct.toFixed(1)}%` : '—'}
+        </Text>
+        <Text color="font.secondary" fontFamily="mono" fontSize="2xs">
+          cap {formatTokenCompact(cap)} {unit}
+        </Text>
+      </Flex>
+      <Box bg="background.level3" h="6px" overflow="hidden" rounded="sm" w="full">
+        <Box
+          bg={overflow ? 'red.500' : 'primary.500'}
+          h="full"
+          transition="width 0.3s ease"
+          w={`${pct}%`}
+        />
+      </Box>
+      <Text color="font.secondary" fontSize="2xs">
+        {positionLabel}
+      </Text>
+    </VStack>
+  )
+}
+
+/** Buffer composition bar — left segment = underlying balance, right =
+ *  wrapped balance (converted to underlying units via priceRate).
+ *  Surfaces the imbalance % so a reader can scan whether the next swap
+ *  is likely to trigger a real wrap/unwrap on-chain. */
+function BufferSplitBar({
+  underlyingAmount,
+  underlyingSymbol,
+  wrappedAmountAsUnderlying,
+  wrappedSymbol,
+}: {
+  underlyingAmount: number
+  underlyingSymbol: string
+  wrappedAmountAsUnderlying: number
+  wrappedSymbol: string
+}): React.JSX.Element {
+  const total = underlyingAmount + wrappedAmountAsUnderlying
+  const hasData = Number.isFinite(total) && total > 0
+  const underlyingPct = hasData ? (underlyingAmount / total) * 100 : 0
+  const wrappedPct = hasData ? 100 - underlyingPct : 0
+  const imbalance = hasData ? Math.abs(underlyingPct - 50) : null
+  const imbalanceColor =
+    imbalance == null
+      ? 'font.secondary'
+      : imbalance >= 25
+        ? 'red.400'
+        : imbalance >= 10
+          ? 'yellow.400'
+          : 'green.400'
+  return (
+    <VStack align="stretch" spacing="2xs" w="full">
+      <Flex align="center" justify="space-between">
+        <Text color="font.secondary" fontFamily="mono" fontSize="xs">
+          {hasData ? `${formatTokenCompact(total)} ${underlyingSymbol}` : '—'}
+        </Text>
+        <Text color={imbalanceColor} fontFamily="mono" fontSize="2xs">
+          {imbalance == null ? '' : `${imbalance.toFixed(1)}% off 50/50`}
+        </Text>
+      </Flex>
+      <Box bg="background.level3" h="8px" overflow="hidden" rounded="sm" w="full">
+        <Flex h="full" w="full">
+          <Box bg="primary.400" h="full" transition="width 0.3s ease" w={`${underlyingPct}%`} />
+          <Box bg="purple.400" h="full" transition="width 0.3s ease" w={`${wrappedPct}%`} />
+        </Flex>
+      </Box>
+      <HStack justify="space-between" spacing="xs">
+        <HStack spacing="2xs">
+          <Box bg="primary.400" h="2" rounded="sm" w="2" />
+          <Text color="font.secondary" fontSize="2xs">
+            {formatTokenCompact(underlyingAmount)} {underlyingSymbol}
+          </Text>
+        </HStack>
+        <HStack spacing="2xs">
+          <Box bg="purple.400" h="2" rounded="sm" w="2" />
+          <Text color="font.secondary" fontSize="2xs">
+            {formatTokenCompact(wrappedAmountAsUnderlying)} as {wrappedSymbol}
+          </Text>
+        </HStack>
+      </HStack>
+    </VStack>
+  )
+}
+
+function BufferSection({
+  token,
+  buffer,
+  manageButton,
+}: {
+  token: PoolDetailToken
+  buffer: BufferState | null
+  manageButton: React.ReactNode
+}): React.JSX.Element {
+  const priceRate = parseNum(token.priceRate)
+  const balanceWrapped = parseNum(token.balance)
+  const positionInUnderlying =
+    Number.isFinite(balanceWrapped) && Number.isFinite(priceRate)
+      ? balanceWrapped * priceRate
+      : NaN
+  const maxDeposit = parseNum(token.maxDeposit ?? '')
+  const maxWithdraw = parseNum(token.maxWithdraw ?? '')
+  const underlyingSymbol = token.underlyingToken?.symbol ?? '—'
+  const underlyingDecimals = token.underlyingToken?.decimals ?? token.decimals
+
+  const bufferUnderlying = buffer
+    ? rawToHuman(buffer.underlyingBalanceRaw, underlyingDecimals)
+    : NaN
+  const bufferWrapped = buffer ? rawToHuman(buffer.wrappedBalanceRaw, token.decimals) : NaN
+  const bufferWrappedAsUnderlying =
+    Number.isFinite(bufferWrapped) && Number.isFinite(priceRate)
+      ? bufferWrapped * priceRate
+      : NaN
+
+  const review = (token.erc4626ReviewData?.summary ?? '').toLowerCase()
+  const reviewBadge =
+    review === 'safe' ? (
+      <Badge colorScheme="green" size="sm">
+        safe
+      </Badge>
+    ) : review === 'unsafe' ? (
+      <Badge colorScheme="red" size="sm">
+        unsafe
+      </Badge>
+    ) : review ? (
+      <Badge colorScheme="yellow" size="sm">
+        {review}
+      </Badge>
+    ) : null
+
+  const uninitialized = buffer?.isInitialized === false
+  const initBadge = uninitialized ? (
+    <Badge colorScheme="red" size="sm">
+      uninitialized
+    </Badge>
+  ) : null
+
+  const warnings = token.erc4626ReviewData?.warnings ?? []
+
+  return (
+    <TypeSection
+      badge={
+        <HStack spacing="xs">
+          {initBadge}
+          {reviewBadge}
+        </HStack>
+      }
+      title={`Buffer: ${token.symbol} ↔ ${underlyingSymbol}`}
+    >
+      <StateRow
+        hint="balanced 50/50 means most swaps avoid wrapping on-chain"
+        label="Composition"
+        value={
+          buffer ? (
+            <BufferSplitBar
+              underlyingAmount={bufferUnderlying}
+              underlyingSymbol={underlyingSymbol}
+              wrappedAmountAsUnderlying={bufferWrappedAsUnderlying}
+              wrappedSymbol={token.symbol}
+            />
+          ) : (
+            'buffer read unavailable'
+          )
+        }
+      />
+      <StateRow
+        hint="how much underlying the pool's wrapped position represents"
+        label="Pool position"
+        value={`${formatTokenCompact(positionInUnderlying)} ${underlyingSymbol}`}
+      />
+      <StateRow
+        hint="how much can be deposited into the ERC4626 vault right now"
+        label="Deposit headroom"
+        value={
+          <CapacityBar
+            cap={maxDeposit}
+            position={positionInUnderlying}
+            positionLabel={`pool position ${formatTokenCompact(positionInUnderlying)} ${underlyingSymbol}`}
+            unit={underlyingSymbol}
+          />
+        }
+      />
+      <StateRow
+        hint="how much can be withdrawn from the ERC4626 vault right now"
+        label="Withdraw headroom"
+        value={
+          <CapacityBar
+            cap={maxWithdraw}
+            position={positionInUnderlying}
+            positionLabel={`pool position ${formatTokenCompact(positionInUnderlying)} ${underlyingSymbol}`}
+            unit={underlyingSymbol}
+          />
+        }
+      />
+      {warnings.length > 0 && (
+        <StateRow
+          label="Warnings"
+          value={
+            <Text fontSize="xs" wordBreak="break-word">
+              {warnings.join(' · ')}
+            </Text>
+          }
+        />
+      )}
       {manageButton}
     </TypeSection>
   )
@@ -610,8 +1443,8 @@ export function PoolStatePanel({
   // ── Inline manage buttons (ops.balancer.fi payload builders) ────────
   // Previously these lived in a dedicated "Manage parameters" card;
   // pulled into the relevant section cards now (fee setter → Fee
-  // parameters, surge tuning → StableSurge hook, reCLAMM payload →
-  // reCLAMM) so the card grid stays compact and each action sits next
+  // parameters, surge tuning → StableSurge hook, AutoRange payload →
+  // AutoRange) so the card grid stays compact and each action sits next
   // to the values it changes.
   const opsNetwork = poolDetail.chain.toLowerCase()
   // All four payload builders below now accept `?network=&pool=` query
@@ -644,11 +1477,13 @@ export function PoolStatePanel({
       }}
     />
   ) : null
-  const reclammManageButton = state.reclamm ? (
+  const autoRangeManageButton = state.reclamm ? (
     <ManageButton
       link={{
-        label: 'Manage reCLAMM',
-        hint: 'reCLAMM payload builder',
+        label: 'Manage AutoRange',
+        // ops.balancer.fi's product is "AutoRange" but the live route is
+        // still /payload-builder/reclamm (the /autorange slug 404s).
+        hint: 'AutoRange payload builder',
         href: `${OPS_BASE}/payload-builder/reclamm${opsQuery}`,
       }}
     />
@@ -665,6 +1500,32 @@ export function PoolStatePanel({
       />
     ) : null
 
+  // Buffer sections — one section per ERC4626 token. The buffer-state
+  // RPC read fires on the page and resolves to `null` for chains without
+  // a VaultExplorer entry; the section renders capacity-bars-only in
+  // that case so users still see maxDeposit/maxWithdraw context.
+  const wrappedTokens = isV3 ? poolDetail.tokens.filter(t => t.isErc4626) : []
+  const buffersByAddress = new Map<string, BufferState>()
+  if (state.bufferStates) {
+    for (const b of state.bufferStates) buffersByAddress.set(b.wrappedToken.toLowerCase(), b)
+  }
+  const bufferSections = wrappedTokens.map(token => (
+    <BufferSection
+      buffer={buffersByAddress.get(token.address.toLowerCase()) ?? null}
+      key={token.address}
+      manageButton={
+        <ManageButton
+          link={{
+            label: 'Manage buffer',
+            hint: 'Buffer management payload builder on ops.balancer.fi',
+            href: `${OPS_BASE}/payload-builder/manage-buffer?network=${opsNetwork}&token=${token.address}`,
+          }}
+        />
+      }
+      token={token}
+    />
+  ))
+
   // Each `state.*` slot is at most one block per pool — gather the
   // type-specific Card to render in the grid as a single ReactNode so
   // the grid composition stays declarative below.
@@ -677,7 +1538,11 @@ export function PoolStatePanel({
     typeSpecificCard = <GyroEclpSection eclp={state.gyroEclp} />
   } else if (state.reclamm) {
     typeSpecificCard = (
-      <ReclammSection manageButton={reclammManageButton} rc={state.reclamm} />
+      <AutoRangeSection
+        manageButton={autoRangeManageButton}
+        rc={state.reclamm}
+        tokens={poolDetail.tokens}
+      />
     )
   } else if (state.lbp) {
     typeSpecificCard = <LbpSection lbp={state.lbp} tokens={poolDetail.tokens} />
@@ -719,7 +1584,7 @@ export function PoolStatePanel({
       {/* Section cards — each is a peer in the 2-col grid. Manage
           actions live inside the section they affect rather than in a
           separate Manage card (fee setter → Fee parameters; surge
-          tuning → StableSurge hook; reCLAMM payload → reCLAMM). */}
+          tuning → StableSurge hook; AutoRange payload → AutoRange). */}
       <SimpleGrid columns={{ base: 1, lg: 2 }} spacing="md" w="full">
         {u && (
           <TypeSection title="Fee parameters">
@@ -787,8 +1652,14 @@ export function PoolStatePanel({
         {typeSpecificCard}
 
         {state.stableSurge && (
-          <StableSurgeSection manageButton={surgeManageButton} ss={state.stableSurge} />
+          <StableSurgeSection
+            manageButton={surgeManageButton}
+            ss={state.stableSurge}
+            tokens={poolDetail.tokens}
+          />
         )}
+
+        {bufferSections}
       </SimpleGrid>
     </VStack>
   )

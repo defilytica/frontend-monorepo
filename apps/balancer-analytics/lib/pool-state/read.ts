@@ -35,6 +35,9 @@ const VAULT_EXPLORER_ABI = parseAbi([
   'function getAggregateFeePercentages(address pool) view returns (uint256 swapFee, uint256 yieldFee)',
   'function isPoolPaused(address pool) view returns (bool)',
   'function isPoolInRecoveryMode(address pool) view returns (bool)',
+  'function getBufferBalance(address wrappedToken) view returns (uint256 underlyingBalance, uint256 wrappedBalance)',
+  'function isERC4626BufferInitialized(address wrappedToken) view returns (bool)',
+  'function getBufferTotalShares(address wrappedToken) view returns (uint256)',
 ]) satisfies Abi
 
 const STABLE_POOL_ABI = parseAbi([
@@ -77,6 +80,15 @@ const V3_GYRO_ECLP_ABI = parseAbi([
 
 const V3_RECLAMM_ABI = parseAbi([
   'function computeCurrentPriceRatio() view returns (uint256)',
+  'function computeCurrentPriceRange() view returns (uint256 minPrice, uint256 maxPrice)',
+  'function computeCurrentVirtualBalances() view returns (uint256 virtualBalanceA, uint256 virtualBalanceB, bool changed)',
+  // Returns the per-token live balances as 1e18-scaled values (the Vault
+  // normalizes every pool token to 18-decimal internally). Pairs with
+  // virtualBalances under the same scaling so the margin math in the
+  // section component sees consistent units. Spot price is derived from
+  // these on the client (matches frontend-v3) — no `computeCurrentSpotPrice`
+  // call because that function isn't present on every reCLAMM deployment.
+  'function getCurrentLiveBalances() view returns (uint256[] balancesLiveScaled18)',
   'function getCenterednessMargin() view returns (uint256)',
   'function getDailyPriceShiftExponent() view returns (uint256)',
   'function isPoolWithinTargetRange() view returns (bool)',
@@ -164,9 +176,31 @@ export type GyroEclpTypeState = {
 }
 
 export type ReclammTypeState = {
+  /** Current ratio of max/min price (1e18-scaled). */
   currentPriceRatio: string
+  /** Current minimum price of the active range (1e18-scaled, token B per
+   *  token A — same orientation the contract uses internally). */
+  minPrice: string
+  /** Current maximum price of the active range. */
+  maxPrice: string
+  /** Virtual balances after the contract's just-in-time recompute, 1e18
+   *  fixed-point scaled. Combined with `liveBalance{A,B}` these give the
+   *  invariant and let the section compute lower/upper margin prices —
+   *  i.e. the boundaries of the green "target range" band on the chart. */
+  virtualBalanceA: string
+  virtualBalanceB: string
+  /** Live token balances, 1e18 fixed-point scaled (the Vault normalizes
+   *  every pool token to 18 decimals internally — so a 6-decimal USDC
+   *  balance of 1.0 reads as `1e18` here too). */
+  liveBalanceA: string
+  liveBalanceB: string
+  /** Centeredness margin (1e18-scaled fraction). The pool starts shifting
+   *  to recenter once centeredness drops below this margin. */
   centerednessMargin: string
+  /** Daily price-shift exponent (1e18-scaled fraction). Caps how much the
+   *  bounds can drift per day when out-of-center. */
   dailyPriceShiftExponent: string
+  /** Last on-chain interaction timestamp. Bounds drift is keyed off this. */
   lastTimestamp: number
   isWithinTargetRange: boolean
   priceRatio: {
@@ -517,8 +551,13 @@ export async function readGyroEclpTypeState(
   }
 }
 
-/** reCLAMM — current price ratio, centeredness, shift exponent, range
- *  status, and the price-ratio update schedule. */
+/** AutoRange (contract type `RECLAMM`) — full live state for the bounds
+ *  visualization: price ratio, min/max range, spot price, live + virtual
+ *  balances, centeredness, shift exponent, range status, last interaction,
+ *  and the price-ratio update schedule. One multicall, every read in
+ *  `allowFailure` so a partial-result still surfaces the values we did
+ *  get. Function name keeps the legacy `reclamm` token to match the
+ *  contract type slug callers dispatch on (`poolDetail.type === 'RECLAMM'`). */
 export async function readReclammTypeState(
   chain: GqlChain,
   poolAddress: Address
@@ -527,6 +566,9 @@ export async function readReclammTypeState(
   const results = await client.multicall({
     contracts: [
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentPriceRatio' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentPriceRange' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'computeCurrentVirtualBalances' },
+      { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getCurrentLiveBalances' },
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getCenterednessMargin' },
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'getDailyPriceShiftExponent' },
       { address: poolAddress, abi: V3_RECLAMM_ABI, functionName: 'isPoolWithinTargetRange' },
@@ -536,8 +578,17 @@ export async function readReclammTypeState(
     allowFailure: true,
   })
   if (results[0].status !== 'success') return null
-  const prs = results[5].status === 'success'
-    ? (results[5].result as {
+  const range = results[1].status === 'success'
+    ? (results[1].result as readonly [bigint, bigint])
+    : null
+  const vb = results[2].status === 'success'
+    ? (results[2].result as readonly [bigint, bigint, boolean])
+    : null
+  const lb = results[3].status === 'success'
+    ? (results[3].result as readonly bigint[])
+    : null
+  const prs = results[8].status === 'success'
+    ? (results[8].result as {
         startFourthRootPriceRatio: bigint
         endFourthRootPriceRatio: bigint
         priceRatioUpdateStartTime: number
@@ -546,14 +597,20 @@ export async function readReclammTypeState(
     : null
   return {
     currentPriceRatio: (results[0].result as bigint).toString(),
+    minPrice: range ? range[0].toString() : '0',
+    maxPrice: range ? range[1].toString() : '0',
+    virtualBalanceA: vb ? vb[0].toString() : '0',
+    virtualBalanceB: vb ? vb[1].toString() : '0',
+    liveBalanceA: lb && lb.length >= 2 ? lb[0].toString() : '0',
+    liveBalanceB: lb && lb.length >= 2 ? lb[1].toString() : '0',
     centerednessMargin:
-      results[1].status === 'success' ? (results[1].result as bigint).toString() : '0',
+      results[4].status === 'success' ? (results[4].result as bigint).toString() : '0',
     dailyPriceShiftExponent:
-      results[2].status === 'success' ? (results[2].result as bigint).toString() : '0',
+      results[5].status === 'success' ? (results[5].result as bigint).toString() : '0',
     isWithinTargetRange:
-      results[3].status === 'success' ? (results[3].result as boolean) : false,
+      results[6].status === 'success' ? (results[6].result as boolean) : false,
     lastTimestamp:
-      results[4].status === 'success' ? Number(results[4].result as bigint) : 0,
+      results[7].status === 'success' ? Number(results[7].result as bigint) : 0,
     priceRatio: prs
       ? {
           start: prs.startFourthRootPriceRatio.toString(),
@@ -669,4 +726,102 @@ export async function readStableSurgeState(
     }
   }
   return null
+}
+
+// ── ERC4626 buffer state ────────────────────────────────────────────────
+//
+// The V3 Vault keeps a per-wrapped-token buffer that holds both the
+// underlying and the wrapped (yield-bearing) form so swap paths can wrap
+// or unwrap without round-tripping to the underlying ERC4626 vault on
+// every trade. api-v3 surfaces `maxDeposit` / `maxWithdraw` (the wrapper's
+// own caps) but NOT the buffer's internal `(underlying, wrapped)` split —
+// that lives on-chain only. This read fills that gap.
+
+/** Per-wrapped-token buffer state. Raw u256 strings — the consumer
+ *  formats with the matching token's decimals. `null` underlying/wrapped
+ *  means the multicall slot failed (chain doesn't have a VaultExplorer
+ *  on it, the wrapped isn't a registered buffer, etc.); the panel falls
+ *  back to capacity-bars-only for that row. */
+export type BufferState = {
+  /** Wrapped (ERC4626) token address. Lowercased to match api-v3. */
+  wrappedToken: string
+  /** Raw u256 underlying-token balance held by the buffer, in the
+   *  underlying's decimals. Null when the read failed. */
+  underlyingBalanceRaw: string | null
+  /** Raw u256 wrapped-token balance held by the buffer, in the wrapped
+   *  token's own decimals. Null when the read failed. */
+  wrappedBalanceRaw: string | null
+  /** True if `Vault.initializeBuffer` has been called for this wrapper.
+   *  When false the buffer is empty and the pool can't avoid wrapping
+   *  on each swap that touches this token. */
+  isInitialized: boolean | null
+  /** Raw u256 total of internal buffer shares (LP accounting). Null on
+   *  read failure. */
+  totalSharesRaw: string | null
+}
+
+export async function readBufferStates(
+  chain: GqlChain,
+  wrappedTokens: readonly Address[]
+): Promise<BufferState[] | null> {
+  if (wrappedTokens.length === 0) return []
+  const helpers = getV3HelperAddresses(chain)
+  if (!helpers?.vaultExplorer) return null
+
+  const client = getPublicClient(chain)
+
+  // 3 reads per wrapped token: balance (2 values, 1 call), init status,
+  // total shares. allowFailure handles wrappers that aren't (yet) buffer-
+  // initialized — those revert on getBufferBalance instead of returning
+  // zeros, so we mark the slot null rather than throwing the whole batch.
+  const contracts: ContractFunctionParameters[] = wrappedTokens.flatMap(addr => [
+    {
+      address: helpers.vaultExplorer as Address,
+      abi: VAULT_EXPLORER_ABI,
+      functionName: 'getBufferBalance',
+      args: [addr],
+    },
+    {
+      address: helpers.vaultExplorer as Address,
+      abi: VAULT_EXPLORER_ABI,
+      functionName: 'isERC4626BufferInitialized',
+      args: [addr],
+    },
+    {
+      address: helpers.vaultExplorer as Address,
+      abi: VAULT_EXPLORER_ABI,
+      functionName: 'getBufferTotalShares',
+      args: [addr],
+    },
+  ])
+
+  const results = await client.multicall({ contracts, allowFailure: true })
+
+  return wrappedTokens.map((addr, i) => {
+    const balResult = results[i * 3]
+    const initResult = results[i * 3 + 1]
+    const sharesResult = results[i * 3 + 2]
+
+    let underlyingBalanceRaw: string | null = null
+    let wrappedBalanceRaw: string | null = null
+    if (balResult?.status === 'success') {
+      const [u, w] = balResult.result as readonly [bigint, bigint]
+      underlyingBalanceRaw = u.toString()
+      wrappedBalanceRaw = w.toString()
+    }
+    const isInitialized =
+      initResult?.status === 'success' ? (initResult.result as boolean) : null
+    const totalSharesRaw =
+      sharesResult?.status === 'success'
+        ? (sharesResult.result as bigint).toString()
+        : null
+
+    return {
+      wrappedToken: addr.toLowerCase(),
+      underlyingBalanceRaw,
+      wrappedBalanceRaw,
+      isInitialized,
+      totalSharesRaw,
+    }
+  })
 }

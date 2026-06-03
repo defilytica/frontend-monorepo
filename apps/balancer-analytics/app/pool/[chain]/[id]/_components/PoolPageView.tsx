@@ -17,7 +17,7 @@ import {
 import Link from 'next/link'
 import { ChevronRight, ExternalLink, Home } from 'react-feather'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import { useCallback, useEffect, useState, useTransition } from 'react'
+import React, { useCallback, useEffect, useState, useTransition } from 'react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
 import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
 import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
@@ -31,7 +31,7 @@ import { PoolEventLog } from './PoolEventLog'
 import { HistoryRangeToggle, type HistoryRange } from './HistoryRangeToggle'
 import { CompareModeToolbar } from './CompareModeToolbar'
 import { PoolSnapshotTile } from './PoolSnapshotTile'
-import { PoolOrderFlow } from './PoolOrderFlow/PoolOrderFlow'
+import { POOL_TYPE_MODULES } from './poolTypeModules'
 import { PoolTokenPillsLite } from '@analytics/app/_components/PoolTokenPillsLite'
 
 function shortAddr(addr: string): string {
@@ -302,6 +302,8 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
             <PoolSnapshotTile
               events={events}
               flexShrink={0}
+              poolType={poolDetail.type}
+              range={range}
               snapshots={snapshots}
               w={{ base: 'full', md: '260px' }}
             />
@@ -359,15 +361,13 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
           </Stack>
         </FadeInOnView>
 
-        {/* Order flow — Sankey of swap source → token in → token out. Skipped
-            for CowAmm pools where flow is trivially 100% CowSwap. */}
-        {poolDetail.type !== 'COW_AMM' && (
-          <PoolOrderFlow
-            chain={poolDetail.chain}
-            poolId={poolDetail.id}
-            poolTokens={poolDetail.tokens}
-            poolTvlUsd={snapshots[snapshots.length - 1]?.totalLiquidity ?? 0}
-          />
+        {/* Pool-type-specific modules — driven by a tiny registry so adding
+            Autorange / LBP / other type panels next is a one-entry addition
+            in `poolTypeModules.tsx` rather than more conditionals here. */}
+        {POOL_TYPE_MODULES.map(mod =>
+          mod.shouldRender(data) ? (
+            <React.Fragment key={mod.key}>{mod.render(data)}</React.Fragment>
+          ) : null
         )}
 
         {/* Current state — full-width card below the chart. */}

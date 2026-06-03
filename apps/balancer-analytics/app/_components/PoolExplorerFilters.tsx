@@ -17,6 +17,7 @@ import {
   PopoverCloseButton,
   PopoverContent,
   PopoverTrigger,
+  Portal,
   Slider,
   SliderFilledTrack,
   SliderThumb,
@@ -74,7 +75,7 @@ const HOOK_LABEL: Record<string, string> = {
   AKRON: 'Akron',
   LOTTERY: 'Lottery',
   NFTLIQUIDITY_POSITION: 'NFT liquidity',
-  RECLAMM: 'reCLAMM',
+  RECLAMM: 'AutoRange',
   VEBAL_DISCOUNT: 'veBAL discount',
 }
 
@@ -232,13 +233,25 @@ function FilterPopover({
       <PopoverTrigger>
         <FilterButton totalFilterCount={totalFilterCount} />
       </PopoverTrigger>
-      <Box shadow="2xl" zIndex="popover">
-        <PopoverContent motionProps={{ animate: { scale: 1, opacity: 1 } }}>
+      {/* Portal so the popover content renders into document.body — the
+          parent `<Card overflow="hidden">` in PoolExplorer would otherwise
+          clip the popover when the filtered table is short. Shadow + z-index
+          move from the old wrapper `<Box>` directly onto PopoverContent
+          (the Box is no longer load-bearing once we're portaled). */}
+      <Portal>
+        <PopoverContent
+          motionProps={{ animate: { scale: 1, opacity: 1 } }}
+          shadow="2xl"
+          zIndex="popover"
+        >
           <PopoverArrow bg="background.level3" />
           <PopoverCloseButton top="sm" />
           <PopoverBody p="md">
             <VStack align="stretch" spacing="md">
-              <Flex align="center" justify="space-between">
+              {/* `pr="lg"` clears the absolute-positioned `PopoverCloseButton`
+                  so the "Reset all" link doesn't slide underneath the X.
+                  Same approach PoolOrderFlow's filter popover uses. */}
+              <Flex align="center" justify="space-between" pr="lg">
                 <Text
                   background="font.special"
                   backgroundClip="text"
@@ -329,7 +342,7 @@ function FilterPopover({
             </VStack>
           </PopoverBody>
         </PopoverContent>
-      </Box>
+      </Portal>
     </Popover>
   )
 }
