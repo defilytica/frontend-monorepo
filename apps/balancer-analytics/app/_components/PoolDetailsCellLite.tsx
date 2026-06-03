@@ -4,6 +4,7 @@ import { Box, HStack, Text } from '@chakra-ui/react'
 import { BalBadge } from '@repo/lib/shared/components/badges/BalBadge'
 import { PoolVersionTag } from '@repo/lib/modules/pool/PoolList/PoolListTable/PoolVersionTag'
 import { getPoolTypeLabel } from '@repo/lib/modules/pool/pool.utils'
+import { GqlPoolType } from '@repo/lib/shared/services/api/generated/graphql'
 import { BoostedIcon } from '@repo/lib/shared/components/icons/BoostedIcon'
 import { HookIcon } from '@repo/lib/shared/components/icons/HookIcon'
 import { ProtocolIcon } from '@repo/lib/shared/components/icons/ProtocolIcon'
@@ -38,6 +39,12 @@ function formatHookLabel(type: string | null): string {
   )
 }
 
+// Local rebrand override — keeps in lockstep with PoolExplorerFilters.
+function formatPoolTypeLabel(t: GqlPoolType | string): string {
+  if (t === GqlPoolType.Reclamm) return 'AutoRange'
+  return getPoolTypeLabel(t as GqlPoolType)
+}
+
 // Accepts either the explorer's `EnrichedPool` (carries `_hookType`) or any
 // `GetPoolsQuery['pools'][number]` shape directly. The portfolio table
 // reuses this cell against raw query rows, which don't go through `enrich()`.
@@ -60,7 +67,7 @@ export function PoolDetailsCellLite({ pool }: { pool: PoolDetailsInput }) {
         <PoolVersionTag isSmall pool={pool} />
       </Box>
       <Text fontWeight="medium" textAlign="left">
-        {getPoolTypeLabel(pool.type)}
+        {formatPoolTypeLabel(pool.type)}
       </Text>
       {hasIcon && (
         <HStack gap="0.25rem">

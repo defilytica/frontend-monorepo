@@ -188,23 +188,26 @@ function buildChartOption(
     // legend would be redundant and would cost a row of vertical space.
     legend: { show: false },
     // Two grids: top pane for bounds + spot (dominant), bottom for the
-    // centeredness sparkline. `containLabel: true` reserves room for tick
-    // labels but NOT for the axis `name` — which on a vertical axis with
-    // `nameLocation: 'middle'` is rotated 90° and sits `nameGap` to the
-    // left of the labels. `grid.left: 40` budgets enough headroom so the
-    // rotated name fits inside the canvas (rotated text height ≈ 14px,
-    // plus `nameGap: 28` gap, plus label width ≈ 40px → ~82px reserved,
-    // of which `containLabel` reserves the label width auto).
+    // centeredness sparkline. `containLabel: true` reserves space for the
+    // tick LABELS but NOT for the rotated axis `name`. The name sits at
+    // canvas X ≈ `grid.left + tickLabelWidth − nameGap`, so to keep the
+    // name LEFT of the tick labels we need `nameGap > tickLabelWidth`,
+    // and `grid.left` then has to be wide enough that the name doesn't
+    // clip the canvas edge. With price ticks like "1.2345" widening to
+    // ~45 px, `nameGap: 56` parks the rotated name comfortably left of
+    // the labels, and `grid.left: 64` keeps its outer edge inside the
+    // canvas. Same `left` on the bottom pane so the x-axis date column
+    // aligns vertically with the top pane's price column.
     grid: [
       {
-        left: 40,
+        left: 64,
         right: 16,
         top: 12,
         height: '60%',
         containLabel: true,
       },
       {
-        left: 40,
+        left: 64,
         right: 16,
         bottom: 32,
         height: '22%',
@@ -237,17 +240,19 @@ function buildChartOption(
       },
     ],
     yAxis: [
-      // Top pane — bounds + spot. Axis name = pair label, rotated. The
-      // `nameGap: 28` is tight enough that the rotated text fits inside
-      // the `grid.left: 40` budget without clipping against the canvas
-      // edge.
+      // Top pane — bounds + spot. Axis name = pair label, rotated 90°.
+      // `nameGap: 56` is sized to exceed the widest tick label (~45 px
+      // for a 4-significant-digit price), so the rotated name sits
+      // entirely to the LEFT of the tick column rather than overlapping
+      // it. `grid.left: 64` provides the matching canvas margin so the
+      // name doesn't clip the chart edge.
       {
         gridIndex: 0,
         type: 'value',
         scale: true,
         name: pairLabel,
         nameLocation: 'middle',
-        nameGap: 28,
+        nameGap: 56,
         nameTextStyle: { color: COLORS.axisText, fontSize: 12, fontWeight: 500 },
         axisLabel: {
           color: COLORS.axisText,

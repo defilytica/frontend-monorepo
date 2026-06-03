@@ -86,6 +86,15 @@ const formatHookLabel = (t: string) =>
     .map(p => p.charAt(0) + p.slice(1).toLowerCase())
     .join(' ')
 
+// Local rebrand override: show "AutoRange" instead of @repo/lib's "reCLAMM"
+// for the Reclamm pool type. The internal filter value is the raw
+// `GqlPoolType.Reclamm = 'RECLAMM'` enum — unchanged, so server-side
+// filtering and URL params keep working the same.
+function formatPoolTypeLabel(t: GqlPoolType | string): string {
+  if (t === GqlPoolType.Reclamm) return 'AutoRange'
+  return getPoolTypeLabel(t as GqlPoolType)
+}
+
 const formatVersionLabel = (v: number | null) =>
   v === 3 ? 'v3' : v === 2 ? 'v2' : v === 1 ? 'CoW' : ''
 
@@ -305,7 +314,7 @@ function FilterPopover({
                   </Heading>
                   <CheckboxList
                     items={availableTypes}
-                    labelFn={t => getPoolTypeLabel(t as GqlPoolType)}
+                    labelFn={t => formatPoolTypeLabel(t)}
                     onToggle={t => {
                       const next = filters.types.includes(t)
                         ? filters.types.filter(x => x !== t)
@@ -571,7 +580,7 @@ function FilterChips({ filters, setters }: { filters: Filters; setters: FilterSe
         {filters.types.map(type => (
           <AnimatedTag
             key={`type-${type}`}
-            label={getPoolTypeLabel(type as GqlPoolType)}
+            label={formatPoolTypeLabel(type)}
             onClose={() => setters.setTypes(filters.types.filter(t => t !== type))}
           />
         ))}
