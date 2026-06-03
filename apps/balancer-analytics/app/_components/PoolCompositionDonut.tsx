@@ -36,7 +36,7 @@ const POOL_TYPE_OVERRIDES: Record<string, string> = {
   COW_AMM: 'CoW AMM',
   LIQUIDITY_BOOTSTRAPPING: 'Liquidity Bootstrapping',
   FIXED_LBP: 'Fixed LBP',
-  RECLAMM: 'reCLAMM',
+  RECLAMM: 'AutoRange',
   GYRO: 'Gyro 2-CLP',
   GYRO3: 'Gyro 3-CLP',
   GYROE: 'Gyro E-CLP',

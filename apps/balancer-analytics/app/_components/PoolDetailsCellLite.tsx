@@ -23,7 +23,7 @@ const HOOK_LABEL: Record<string, string> = {
   FIXED_LBP: 'Fixed LBP',
   LOTTERY: 'Lottery',
   NFTLIQUIDITY_POSITION: 'NFT liquidity',
-  RECLAMM: 'reCLAMM',
+  RECLAMM: 'AutoRange',
   VEBAL_DISCOUNT: 'veBAL discount',
 }
 

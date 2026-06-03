@@ -75,7 +75,7 @@ const HOOK_LABEL: Record<string, string> = {
   AKRON: 'Akron',
   LOTTERY: 'Lottery',
   NFTLIQUIDITY_POSITION: 'NFT liquidity',
-  RECLAMM: 'reCLAMM',
+  RECLAMM: 'AutoRange',
   VEBAL_DISCOUNT: 'veBAL discount',
 }
 
