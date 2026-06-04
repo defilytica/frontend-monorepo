@@ -1481,10 +1481,8 @@ export function PoolStatePanel({
     <ManageButton
       link={{
         label: 'Manage AutoRange',
-        // ops.balancer.fi's product is "AutoRange" but the live route is
-        // still /payload-builder/reclamm (the /autorange slug 404s).
         hint: 'AutoRange payload builder',
-        href: `${OPS_BASE}/payload-builder/reclamm${opsQuery}`,
+        href: `${OPS_BASE}/payload-builder/autorange${opsQuery}`,
       }}
     />
   ) : null
