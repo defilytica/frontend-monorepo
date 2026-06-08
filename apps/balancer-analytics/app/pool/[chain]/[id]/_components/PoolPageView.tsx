@@ -17,7 +17,7 @@ import {
 import Link from 'next/link'
 import { ChevronRight, ExternalLink, Home } from 'react-feather'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import React, { useCallback, useEffect, useState, useTransition } from 'react'
+import React, { useCallback, useEffect, useMemo, useState, useTransition } from 'react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
 import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
 import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
@@ -28,6 +28,7 @@ import type { PoolPageData } from '../page'
 import { PoolHistoryChart } from './PoolHistoryChart'
 import { PoolStatePanel } from './PoolStatePanel'
 import { PoolEventLog } from './PoolEventLog'
+import { getEventStyle } from './eventStyles'
 import { HistoryRangeToggle, type HistoryRange } from './HistoryRangeToggle'
 import { CompareModeToolbar } from './CompareModeToolbar'
 import { PoolSnapshotTile } from './PoolSnapshotTile'
@@ -94,8 +95,22 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
   // remains in the payload type as an empty array for backwards
   // compatibility, but `events` from the hook is the source of truth.
   const eventsResult = usePoolEvents(poolDetail.chain, poolDetail.id, { fullHistory })
-  const events = eventsResult.events
   const eventsLoading = eventsResult.loading
+
+  // Drop fee-category events that fire as part of the pool's creation tx.
+  // V3 pool registration emits `SwapFeePercentageChanged` + the aggregate
+  // fee events with the *initial* values from inside `Vault.registerPool`,
+  // which the UI was rendering as actual fee changes. Filter anything in
+  // the `fee` category whose block timestamp is at or before `createTime`
+  // — those are the registration-block emissions, not user-driven changes.
+  const events = useMemo(() => {
+    const createTime = poolDetail.createTime
+    if (!createTime) return eventsResult.events
+    return eventsResult.events.filter(e => {
+      if (e.blockTimestamp > createTime) return true
+      return getEventStyle(e.eventName).category !== 'fee'
+    })
+  }, [eventsResult.events, poolDetail.createTime])
 
   // Next's App Router scroll-to-top on navigation is unreliable when the
   // route has a `loading.tsx` Suspense boundary — landing on a pool page

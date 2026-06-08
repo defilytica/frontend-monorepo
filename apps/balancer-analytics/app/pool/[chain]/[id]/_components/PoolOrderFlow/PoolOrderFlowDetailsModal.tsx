@@ -18,6 +18,9 @@ import {
   useToast,
 } from '@chakra-ui/react'
 import { useMemo } from 'react'
+import { getBlockExplorerAddressUrl } from '@repo/lib/shared/utils/blockExplorer'
+import type { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
+import type { GqlChainValues } from '@repo/lib/config/networks'
 import type { SankeyGraph } from './buildSankeyGraph'
 import {
   formatCategory,
@@ -42,6 +45,7 @@ type Props = {
   swaps: readonly LabeledSwap[]
   tokenMap: TokenMap
   periodVolumeUsd: number
+  chain: GqlChainValues
   onClose: () => void
 }
 
@@ -161,6 +165,7 @@ export function PoolOrderFlowDetailsModal({
   swaps,
   tokenMap,
   periodVolumeUsd,
+  chain,
   onClose,
 }: Props) {
   const isOpen = selection !== null
@@ -227,6 +232,7 @@ export function PoolOrderFlowDetailsModal({
               </Text>
               {contributors.slice(0, MAX_CONTRIBUTORS).map(c => (
                 <ContributorRow
+                  chain={chain}
                   contributor={c}
                   key={c.address}
                   totalUsd={totalUsd}
@@ -246,16 +252,18 @@ export function PoolOrderFlowDetailsModal({
 }
 
 function ContributorRow({
+  chain,
   contributor,
   totalUsd,
 }: {
+  chain: GqlChainValues
   contributor: Contributor
   totalUsd: number
 }) {
   const { onCopy } = useClipboard(contributor.address)
   const toast = useToast()
   const pct = totalUsd > 0 ? contributor.valueUsd / totalUsd : 0
-  const explorerUrl = `https://etherscan.io/address/${contributor.address}`
+  const explorerUrl = getBlockExplorerAddressUrl(contributor.address, chain as GqlChain)
 
   return (
     <HStack

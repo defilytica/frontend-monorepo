@@ -256,6 +256,7 @@ export function PoolOrderFlow({ chain, poolId, poolTokens, poolTvlUsd }: Props) 
 
       {graph && view && (
         <PoolOrderFlowDetailsModal
+          chain={chain}
           graph={graph}
           onClose={() => setSelection(null)}
           periodVolumeUsd={view.volumeUsd}

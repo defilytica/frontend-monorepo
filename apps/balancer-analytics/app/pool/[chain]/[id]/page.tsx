@@ -583,12 +583,20 @@ export default async function Page({
     surplus24h: Number(s.surplus24h),
     sharePrice: Number(s.sharePrice),
   }))
-  let trimmedSnapshots = rawSnapshots
-  if (range === '30d' && rawSnapshots.length > 0) {
+  // Drop any snapshot timestamped before the pool was deployed. api-v3
+  // occasionally back-fills the snapshot series with a leading zero-TVL
+  // bucket whose timestamp falls in the day *before* `createTime`, which
+  // the chart then renders as a dip from nowhere. Anchoring on
+  // `poolDetail.createTime` removes those phantom points without affecting
+  // legitimate history.
+  let trimmedSnapshots = poolDetail.createTime
+    ? rawSnapshots.filter(s => s.timestamp >= poolDetail.createTime)
+    : rawSnapshots
+  if (range === '30d' && trimmedSnapshots.length > 0) {
     let latest = 0
-    for (const s of rawSnapshots) if (s.timestamp > latest) latest = s.timestamp
+    for (const s of trimmedSnapshots) if (s.timestamp > latest) latest = s.timestamp
     const cutoff = latest - 30 * 86400
-    trimmedSnapshots = rawSnapshots.filter(s => s.timestamp >= cutoff)
+    trimmedSnapshots = trimmedSnapshots.filter(s => s.timestamp >= cutoff)
   }
 
   const data: PoolPageData = {
