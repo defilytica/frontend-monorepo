@@ -4,6 +4,7 @@ import { Box, Grid, GridItem, Heading, Text, VStack } from '@chakra-ui/react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
 import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
 import { HeroKpiStrip } from './HeroKpiStrip'
+import { ProtocolHighlights } from './ProtocolHighlights'
 import { TvlOverviewChart } from './TvlOverviewChart'
 import { TvlByChainBars } from './TvlByChainBars'
 import { BiggestSwaps } from './BiggestSwaps'
@@ -34,6 +35,10 @@ export function ProtocolOverview() {
           <Box id="liquidity" scrollMarginTop="96px">
             <TvlOverviewChart />
           </Box>
+        </FadeInOnView>
+
+        <FadeInOnView animateOnce={false}>
+          <ProtocolHighlights />
         </FadeInOnView>
 
         <FadeInOnView animateOnce={false}>

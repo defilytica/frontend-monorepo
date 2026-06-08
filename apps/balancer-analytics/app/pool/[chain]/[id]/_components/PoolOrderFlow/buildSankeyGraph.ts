@@ -370,6 +370,17 @@ export function buildSankeyGraph(
   }
 
   // ── Emit links ─────────────────────────────────────────────────────────
+  // Sort by (sourceNodeIndex, targetNodeIndex, sourceCategoryRank). ECharts
+  // sankey sorts edges at each node by the other side's y, but the sort is
+  // STABLE — when multiple edges share the same target y (which happens on
+  // the tokenIn→tokenOut leg, where one source/target pair carries up to
+  // one edge per source category), the data-order tiebreaker decides the
+  // vertical stacking. Emitting Map iteration order (≈ random) meant the
+  // same category color appeared at different vertical positions on each
+  // column transition, so a Kyber-coloured band visible at the TOP of the
+  // source column could land at the BOTTOM of the receiving stack. Sorting
+  // here pins each category to a single vertical lane across all columns.
+  const nodeIndex = new Map<string, number>(nodes.map((n, i) => [n.name, i]))
   const links: SankeyLink[] = []
   for (const l of srcToTinLink.values()) {
     links.push({
@@ -389,6 +400,15 @@ export function buildSankeyGraph(
       swapCount: l.count,
     })
   }
+  links.sort((a, b) => {
+    const aSrc = nodeIndex.get(a.source) ?? 0
+    const bSrc = nodeIndex.get(b.source) ?? 0
+    if (aSrc !== bSrc) return aSrc - bSrc
+    const aTgt = nodeIndex.get(a.target) ?? 0
+    const bTgt = nodeIndex.get(b.target) ?? 0
+    if (aTgt !== bTgt) return aTgt - bTgt
+    return CATEGORY_RANK[a.sourceCategory] - CATEGORY_RANK[b.sourceCategory]
+  })
 
   // ── Category share ────────────────────────────────────────────────────
   const categoryShare = emptyCategoryShare()

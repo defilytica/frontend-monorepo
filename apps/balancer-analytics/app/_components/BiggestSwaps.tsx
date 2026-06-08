@@ -60,7 +60,7 @@ export function BiggestSwaps() {
           </Tag>
         </HStack>
         <Text color="font.secondary" fontSize="xs">
-          refreshes every 5m
+          refreshes hourly
         </Text>
       </Flex>
 

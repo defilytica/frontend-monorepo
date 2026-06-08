@@ -1,18 +1,22 @@
 /**
  * Top SWAP events by USD value over the last 24h, cached server-side.
  *
- * api-v3's `poolEvents` filter doesn't expose `valueUSD_gt` or a timestamp
- * bound, so we fetch a generous window of recent SWAPs (first: 300) sorted by
- * api-v3's default order (timestamp desc), filter to `t >= now - 86400`, sort
- * by valueUSD, and return the top 10. Aggressive `revalidate = 300` means
- * api-v3 sees at most one request per 5 min regardless of how many users hit
- * the dashboard.
+ * api-v3 used to honor `chainIn: [...]` on `poolEvents` and return events from
+ * every chain in the array. As of late Feb 2026 it silently collapses to the
+ * first chain only (effectively MAINNET-only), so a single `chainIn` query
+ * leaves the dashboard blind to swaps on the other 12 networks. We work around
+ * this by aliasing one `poolEvents(chainIn: [<single>])` subquery per chain in
+ * a single GraphQL request — still one upstream HTTP roundtrip — and merging
+ * client-side.
  *
- * Token symbol enrichment is intentionally omitted — addresses are kept
- * short-form and the row links to the chain's block explorer for full detail.
- * Adding symbols would require either a heavy `tokenGetTokens(chains: …)`
- * call per chain or a separate per-address fetch, both of which we want to
- * avoid here.
+ * api-v3 still has no `valueUSD_gt` or timestamp bound, so we pull a generous
+ * window of recent SWAPs per chain (FETCH_PER_CHAIN), filter to
+ * `t >= now - 86400`, sort by valueUSD, return top N. Hourly `revalidate`
+ * means api-v3 sees at most one fan-out request per hour regardless of how
+ * many users hit the dashboard.
+ *
+ * Token symbol enrichment piggy-backs on the same revalidate window via
+ * `tokenGetTokens(chains: …)`.
  */
 
 import 'server-only'
@@ -27,43 +31,59 @@ import {
 import type { BiggestSwap, BiggestSwapsPayload } from '@analytics/lib/biggest-swaps/types'
 
 export const runtime = 'nodejs'
-export const revalidate = 300
+export const revalidate = 3600
 
 const API_URL =
   process.env.NEXT_PUBLIC_BALANCER_API_URL ?? 'https://api-v3.balancer.fi/graphql'
 
-const QUERY = /* GraphQL */ `
-  query BiggestSwaps($first: Int!, $chains: [GqlChain!]!) {
-    poolEvents(first: $first, where: { chainIn: $chains, type: SWAP }) {
-      id
-      poolId
-      timestamp
-      tx
-      valueUSD
-      chain
-      ... on GqlPoolSwapEventV3 {
-        tokenIn {
-          address
-          amount
-        }
-        tokenOut {
-          address
-          amount
-        }
-      }
-      ... on GqlPoolSwapEventCowAmm {
-        tokenIn {
-          address
-          amount
-        }
-        tokenOut {
-          address
-          amount
-        }
-      }
+const SWAP_FIELDS = /* GraphQL */ `
+  id
+  poolId
+  timestamp
+  tx
+  valueUSD
+  chain
+  ... on GqlPoolSwapEventV3 {
+    tokenIn {
+      address
+      amount
+    }
+    tokenOut {
+      address
+      amount
+    }
+  }
+  ... on GqlPoolSwapEventCowAmm {
+    tokenIn {
+      address
+      amount
+    }
+    tokenOut {
+      address
+      amount
     }
   }
 `
+
+// Build one aliased `poolEvents(chainIn: [<chain>])` subfield per supported
+// chain. Aliases (`c0`, `c1`, …) sidestep GraphQL's "fields with same name
+// must have identical args" rule and keep the response addressable by index.
+function buildAliasedQuery(chains: GqlChain[]): string {
+  const subqueries = chains
+    .map(
+      (chain, i) => `
+    c${i}: poolEvents(first: $first, where: { chainIn: [${chain}], type: SWAP }) {
+      ${SWAP_FIELDS}
+    }
+  `
+    )
+    .join('\n')
+  return /* GraphQL */ `
+    query BiggestSwaps($first: Int!) {
+      ${subqueries}
+    }
+  `
+}
 
 const TOKENS_QUERY = /* GraphQL */ `
   query SwapTokens($chains: [GqlChain!]!) {
@@ -90,26 +110,39 @@ type RawEvent = {
 
 const WINDOW_SECONDS = 24 * 60 * 60
 const TOP_N = 10
-const FETCH_LIMIT = 300
+// Recent events per chain. 200 covers ~100 min on MAINNET (the busiest chain)
+// and the full 24h window on the long tail. We sort upstream by timestamp desc
+// and post-filter by USD anyway — the top of the USD distribution is sparse
+// enough that this window catches the outliers we care about. At one upstream
+// call per hour the per-refresh payload (~13 chains × 200 = ~1.3MB) is cheap.
+const FETCH_PER_CHAIN = 200
 
 async function fetchSwaps(): Promise<RawEvent[]> {
-  // Rely on Next.js' route-segment cache (`revalidate = 300`) rather than
+  const chains = PROJECT_CONFIG.supportedNetworks as GqlChain[]
+  // Rely on Next.js' route-segment cache (`revalidate = 3600`) rather than
   // fetch's own cache — the latter is keyed on URL+body and would silently
   // share state across deployments / preview branches.
-  const data = await gqlFetch<{ poolEvents: RawEvent[] }>(
+  const data = await gqlFetch<Record<string, RawEvent[]>>(
     API_URL,
-    QUERY,
-    { first: FETCH_LIMIT, chains: PROJECT_CONFIG.supportedNetworks },
+    buildAliasedQuery(chains),
+    { first: FETCH_PER_CHAIN },
     { upstream: 'api-v3', label: 'biggest-swaps', cache: 'no-store' }
   )
-  return data?.poolEvents ?? []
+  if (!data) return []
+  // Flatten the aliased response. Order doesn't matter — buildPayload sorts
+  // by valueUSD before slicing.
+  const out: RawEvent[] = []
+  for (const events of Object.values(data)) {
+    if (Array.isArray(events)) out.push(...events)
+  }
+  return out
 }
 
 type TokenInfo = { chain: GqlChain; address: string; symbol: string | null; logoURI: string | null }
 
 // Bulk-fetch token metadata for the chains that actually appear in the top
 // swaps. Done once per route refresh (inside the cached function), so the
-// upstream `tokenGetTokens` call is throttled by the same 5-min revalidate
+// upstream `tokenGetTokens` call is throttled by the same revalidate
 // window as the swaps fetch.
 async function fetchTokenMap(chains: GqlChain[]): Promise<Map<string, TokenInfo>> {
   if (chains.length === 0) return new Map()
@@ -136,7 +169,7 @@ async function buildPayload(): Promise<BiggestSwapsPayload> {
   // narrower second query saved bandwidth but blocked behind the first
   // — ~200–400ms of avoidable latency per cache miss. Fetching for every
   // supported network up front is wasteful per-byte but the result is
-  // identical from the user's perspective and the route is cached at 5min,
+  // identical from the user's perspective and the route is cached hourly,
   // so the extra token rows are paid for at most once per window.
   const [events, tokenMap] = await Promise.all([
     fetchSwaps(),
@@ -186,17 +219,17 @@ async function buildPayload(): Promise<BiggestSwapsPayload> {
 const getBiggestSwapsPayload = unstable_cache(
   buildPayload,
   ['biggest-swaps'],
-  { revalidate: 300, tags: ['biggest-swaps'] }
+  { revalidate: 3600, tags: ['biggest-swaps'] }
 )
 
 export async function GET() {
   try {
-    // Browser/CDN cache aligned with the server-side `revalidate: 300` —
-    // 5-min freshness with a generous SWR window so navigation back to the
-    // dashboard is instant.
+    // Browser/CDN cache aligned with the server-side `revalidate: 3600` —
+    // 1h freshness with a 2h SWR window so navigation back to the dashboard
+    // is instant.
     return Response.json(await getBiggestSwapsPayload(), {
       headers: {
-        'Cache-Control': 'public, max-age=300, stale-while-revalidate=1800',
+        'Cache-Control': 'public, max-age=3600, stale-while-revalidate=7200',
       },
     })
   } catch (err) {

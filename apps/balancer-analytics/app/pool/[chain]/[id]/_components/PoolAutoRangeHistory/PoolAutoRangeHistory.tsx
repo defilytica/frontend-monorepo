@@ -61,13 +61,24 @@ const pctFmt = (n: number): string => {
 
 // ── Chart palette — tuned against the existing card background so the
 // bands sit visibly without overpowering the spot line. Kept central so
-// the legend chips and the ECharts series read the same colors. ──
+// the legend chips and the ECharts series read the same colors.
+//
+// Bands and target use the same orange.300 (#fdba74) / green.300 (#63f2be)
+// hues as the live AutoRange distribution bar in PoolStatePanel and the
+// frontend-v3 reCLAMM barometer chart. The "gradient" effect inside each
+// zone is produced by stacking N thin sub-bands with bell-curve / linear
+// alpha distributions across them — see `buildSubBandSeries` below for
+// the rationale.
 const COLORS = {
-  marginBand: 'rgba(253, 186, 116, 0.32)', // chakra orange.300 @32%
-  marginBandEdge: 'rgba(253, 186, 116, 0.55)',
-  targetBand: 'rgba(99, 242, 190, 0.42)', // chakra green.300 @42%
-  targetBandEdge: 'rgba(99, 242, 190, 0.7)',
+  // Hue strings for the alpha-modulated sub-bands. Same RGB as the
+  // frontend-v3 reCLAMM chart (`ReclAmmChartProvider.tsx`).
+  marginRgb: '253, 186, 116', // chakra orange.300
+  targetRgb: '99, 242, 190', // chakra green.300
+  // Legend swatch + tooltip dot colors (single representative tone per band)
+  marginBandEdge: 'rgba(249, 115, 22, 0.70)', // chakra orange.500
+  targetBandEdge: 'rgba(99, 242, 190, 0.70)',
   spot: '#2dd4bf', // chakra teal.400 — clearly distinct from the green band
+  spotGlow: 'rgba(45, 212, 191, 0.85)', // matches spot, used for the line halo
   centeredness: '#c4b5fd', // chakra purple.300
   centerednessFill: 'rgba(196, 181, 253, 0.18)',
   marginThreshold: 'rgba(248, 113, 113, 0.7)', // chakra red.400 — danger line
@@ -80,6 +91,100 @@ const COLORS = {
   tooltipBorder: 'rgba(255, 255, 255, 0.06)',
   tooltipText: '#e5e7eb',
 } as const
+
+// ── Sub-band tick math ─────────────────────────────────────────────────
+//
+// Frontend-v3's reCLAMM chart (`ReclAmmChartProvider`) uses a fixed
+// 52-tick palette for the in-range region (margin + target + margin) and
+// derives the orange/green split from the pool's centeredness margin %.
+// Porting the same math here means the history chart's sub-band density
+// MATCHES the live barometer for the same pool: 10% margin → 2 / 48 / 2,
+// 20% margin → 5 / 42 / 5, <4% margin pins the orange "pinstripe" at 1
+// tick per side. Each sub-band's per-x height = (band height) / N, so
+// the stack warps with the band geometry — a static areaStyle gradient
+// can't do that because ECharts maps gradient coords to the static
+// bounding box of the filled shape.
+const TOTAL_INRANGE_TICKS = 52
+
+function deriveSubBandCounts(marginFraction: number): {
+  orangeCount: number
+  greenCount: number
+} {
+  const marginPct = Math.max(0, Math.min(100, marginFraction * 100))
+  const orangeCount =
+    marginPct < 4 ? 1 : Math.floor((TOTAL_INRANGE_TICKS * marginPct) / 100 / 2)
+  const greenCount = TOTAL_INRANGE_TICKS - 2 * orangeCount
+  return { orangeCount, greenCount }
+}
+
+// Alpha envelopes — produce a per-sub-band alpha given the index and the
+// total sub-band count. Domain notes:
+// - Target: cosine bell, peaks at center (geometric midline of the band).
+// - Margin: linear ramp toward the OUTER edge so the brightest stripe sits
+//   adjacent to `min` (lower band) / `max` (upper band) — same intuition
+//   as the live state bar, where the bounds edge reads as the "hot" zone.
+const TARGET_ALPHA_PEAK = 0.55
+const TARGET_ALPHA_FLOOR = 0.05
+const MARGIN_ALPHA_PEAK = 0.55
+const MARGIN_ALPHA_FLOOR = 0.1
+
+function targetAlpha(i: number, n: number): number {
+  if (n <= 1) return TARGET_ALPHA_PEAK
+  const t = (i + 0.5) / n // fractional center, (0, 1)
+  const distFromCenter = Math.abs(t - 0.5) * 2 // 0 at center, 1 at edges
+  const weight = Math.cos((distFromCenter * Math.PI) / 2) // cos bell
+  return TARGET_ALPHA_FLOOR + (TARGET_ALPHA_PEAK - TARGET_ALPHA_FLOOR) * weight
+}
+
+/** Lower margin: sub-band 0 sits adjacent to `min` (outer, hot); sub-band
+ *  N-1 sits adjacent to the green target (inner, soft). */
+function lowerMarginAlpha(i: number, n: number): number {
+  if (n <= 1) return (MARGIN_ALPHA_PEAK + MARGIN_ALPHA_FLOOR) / 2
+  const t = (i + 0.5) / n
+  return MARGIN_ALPHA_PEAK - (MARGIN_ALPHA_PEAK - MARGIN_ALPHA_FLOOR) * t
+}
+
+/** Upper margin: sub-band 0 sits adjacent to the green target (inner,
+ *  soft); sub-band N-1 sits adjacent to `max` (outer, hot). Mirror of
+ *  lowerMarginAlpha so both margin zones burn the same color outward. */
+function upperMarginAlpha(i: number, n: number): number {
+  if (n <= 1) return (MARGIN_ALPHA_PEAK + MARGIN_ALPHA_FLOOR) / 2
+  const t = (i + 0.5) / n
+  return MARGIN_ALPHA_FLOOR + (MARGIN_ALPHA_PEAK - MARGIN_ALPHA_FLOOR) * t
+}
+
+/** Build N stacked thin sub-bands that together fill `bandHeights`. Each
+ *  sub-band's per-x height = bandHeights[x] / N, so the stack tracks the
+ *  actual upper/lower curves of the band. Alpha across the stack is
+ *  driven by the supplied envelope function. */
+function buildSubBandSeries(
+  count: number,
+  bandHeights: (number | null)[],
+  x: number[],
+  alphaFor: (i: number, n: number) => number,
+  colorRgb: string,
+  namePrefix: string
+) {
+  if (count <= 0) return []
+  return Array.from({ length: count }, (_, i) => {
+    const alpha = alphaFor(i, count)
+    return {
+      name: `_${namePrefix}_${i}`,
+      type: 'line' as const,
+      xAxisIndex: 0,
+      yAxisIndex: 0,
+      stack: 'bounds',
+      symbol: 'none',
+      showSymbol: false,
+      lineStyle: { opacity: 0 },
+      areaStyle: { color: `rgba(${colorRgb}, ${alpha})` },
+      data: x.map((t, idx) => [
+        t,
+        bandHeights[idx] === null ? null : (bandHeights[idx] as number) / count,
+      ]),
+    }
+  })
+}
 
 /** Compact "Mar 5" / "Mar 5 '25" date formatter for the bottom x-axis. */
 function fmtDateShort(ms: number): string {
@@ -94,11 +199,15 @@ function fmtDateShort(ms: number): string {
 }
 
 /**
- * Build ECharts option object. The bounds band is rendered as 4 stacked
- * line series (min floor, low-min, high-low, max-high) with `areaStyle`
- * so the filled regions cleanly compose into [orange | green | orange]
- * without any z-order trickery. The spot line is a separate series above
- * the stack.
+ * Build ECharts option object. The bounds region is rendered as a stack
+ * of thin sub-band line series with `areaStyle` so the filled deltas
+ * compose into [orange margin | green target | orange margin]. Each
+ * zone's sub-band count is derived from the pool's centeredness margin
+ * % (`deriveSubBandCounts`) so the sub-band density matches the live
+ * frontend-v3 reCLAMM barometer. Alpha across the sub-bands is shaped by
+ * `targetAlpha` / `lowerMarginAlpha` / `upperMarginAlpha`. The spot line
+ * sits above the stack with a `shadowBlur` glow so it stays legible on
+ * the variegated background.
  *
  * `connectNulls: false` so a NaN sample (failed archive read for that
  * block) produces a visible gap rather than interpolating across — the
@@ -142,6 +251,34 @@ function buildChartOption(
   const lowMinusMin = deltaOrNull(lowT, min)
   const highMinusLow = deltaOrNull(highT, lowT)
   const maxMinusHigh = deltaOrNull(max, highT)
+
+  // Sub-band tick density mirrors the frontend-v3 reCLAMM barometer for
+  // this pool (`ReclAmmChartProvider`: 52 in-range ticks split by margin%).
+  const { orangeCount, greenCount } = deriveSubBandCounts(centerednessMarginFraction)
+  const lowerMarginBands = buildSubBandSeries(
+    orangeCount,
+    lowMinusMin,
+    x,
+    lowerMarginAlpha,
+    COLORS.marginRgb,
+    'margin-low'
+  )
+  const targetBands = buildSubBandSeries(
+    greenCount,
+    highMinusLow,
+    x,
+    targetAlpha,
+    COLORS.targetRgb,
+    'target'
+  )
+  const upperMarginBands = buildSubBandSeries(
+    orangeCount,
+    maxMinusHigh,
+    x,
+    upperMarginAlpha,
+    COLORS.marginRgb,
+    'margin-high'
+  )
 
   return {
     animation: false,
@@ -293,7 +430,11 @@ function buildChartOption(
       },
     ],
     series: [
-      // ── Bounds stack (invisible bottom + 3 filled deltas) ──────────
+      // ── Bounds stack (invisible floor + N orange + N green + N orange) ─
+      // The floor at `min` is the invisible baseline; each band above it
+      // is a vertical stack of thin sub-bands at fixed fractional positions
+      // within the band, so the alpha envelopes (`targetAlpha`, …) warp
+      // with the actual band geometry as bounds shift.
       {
         name: '_min-floor',
         type: 'line',
@@ -305,43 +446,36 @@ function buildChartOption(
         showSymbol: false,
         data: x.map((t, i) => [t, min[i]]),
       },
+      ...lowerMarginBands,
+      ...targetBands,
+      ...upperMarginBands,
+      // ── Spot halo + line ───────────────────────────────────────────
+      // Two-pass render: a thicker, low-opacity halo underneath plus a
+      // sharp top line, layered with `z` so the halo stays beneath the
+      // sharp stroke. ECharts' `shadowBlur` on the line works too but the
+      // dual-series approach gives a softer, more uniform glow against
+      // the variegated band backdrop without the harsh "outer-glow ring"
+      // shadowBlur leaves on sharp inflection points.
       {
-        name: '_margin-low',
+        name: '_spot-halo',
         type: 'line',
         xAxisIndex: 0,
         yAxisIndex: 0,
-        stack: 'bounds',
+        smooth: 0.2,
         symbol: 'none',
         showSymbol: false,
-        lineStyle: { opacity: 0 },
-        areaStyle: { color: COLORS.marginBand },
-        data: x.map((t, i) => [t, lowMinusMin[i]]),
+        lineStyle: {
+          color: COLORS.spotGlow,
+          width: 6,
+          opacity: 0.45,
+          shadowColor: COLORS.spotGlow,
+          shadowBlur: 14,
+        },
+        connectNulls: false,
+        z: 6,
+        silent: true, // tooltip / hover comes from the sharp series
+        data: x.map((t, i) => [t, spot[i]]),
       },
-      {
-        name: '_target',
-        type: 'line',
-        xAxisIndex: 0,
-        yAxisIndex: 0,
-        stack: 'bounds',
-        symbol: 'none',
-        showSymbol: false,
-        lineStyle: { opacity: 0 },
-        areaStyle: { color: COLORS.targetBand },
-        data: x.map((t, i) => [t, highMinusLow[i]]),
-      },
-      {
-        name: '_margin-high',
-        type: 'line',
-        xAxisIndex: 0,
-        yAxisIndex: 0,
-        stack: 'bounds',
-        symbol: 'none',
-        showSymbol: false,
-        lineStyle: { opacity: 0 },
-        areaStyle: { color: COLORS.marginBand },
-        data: x.map((t, i) => [t, maxMinusHigh[i]]),
-      },
-      // ── Spot line ──────────────────────────────────────────────────
       {
         name: 'Spot',
         type: 'line',
@@ -352,10 +486,15 @@ function buildChartOption(
         symbolSize: 5,
         showSymbol: false,
         emphasis: { focus: 'series', scale: false },
-        lineStyle: { color: COLORS.spot, width: 2 },
+        lineStyle: {
+          color: COLORS.spot,
+          width: 2,
+          shadowColor: COLORS.spotGlow,
+          shadowBlur: 6,
+        },
         itemStyle: { color: COLORS.spot, borderColor: '#0b0d12', borderWidth: 2 },
         connectNulls: false,
-        z: 5,
+        z: 7,
         data: x.map((t, i) => [t, spot[i]]),
       },
       // ── Centeredness sparkline (bottom pane) ───────────────────────
@@ -446,10 +585,10 @@ export function PoolAutoRangeHistory({
                 fontSize="xs"
                 spacing="md"
               >
-                <LegendChip color="rgba(99, 242, 190, 0.55)" label="Target range" />
-                <LegendChip color="rgba(253, 186, 116, 0.45)" label="Margin zone" />
-                <LegendChip color="#2dd4bf" label="Spot" variant="line" />
-                <LegendChip color="#c4b5fd" label="Centeredness" variant="line" />
+                <LegendChip color={COLORS.targetBandEdge} label="Target range" />
+                <LegendChip color={COLORS.marginBandEdge} label="Margin zone" />
+                <LegendChip color={COLORS.spot} label="Spot" variant="line" />
+                <LegendChip color={COLORS.centeredness} label="Centeredness" variant="line" />
                 <LegendChip
                   color="rgba(248, 113, 113, 0.30)"
                   label={`Drift zone <${(centerednessMarginFraction * 100).toFixed(0)}%`}

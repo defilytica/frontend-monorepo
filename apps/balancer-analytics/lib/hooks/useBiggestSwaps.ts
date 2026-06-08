@@ -21,7 +21,7 @@ const INITIAL: State = { items: [], loading: true, error: null, generatedAt: nul
 /**
  * Reads the server-cached top-swaps feed (`/api/biggest-swaps`). Single
  * fetch on mount, no polling — freshness comes from the route's
- * `revalidate = 300` (5 min). The previous live-tape hook polled api-v3
+ * `revalidate = 3600` (1 h). The previous live-tape hook polled api-v3
  * every 30s per visitor and was the main analytics-side load on the API.
  */
 export function useBiggestSwaps() {
