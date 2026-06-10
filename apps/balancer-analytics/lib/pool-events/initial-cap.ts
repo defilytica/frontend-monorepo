@@ -17,27 +17,7 @@
  */
 
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
-
-/** Average block time in seconds per chain. */
-const SECONDS_PER_BLOCK: Record<GqlChain, number> = {
-  [GqlChain.Mainnet]: 12,
-  [GqlChain.Arbitrum]: 0.25,
-  [GqlChain.Avalanche]: 2,
-  [GqlChain.Base]: 2,
-  [GqlChain.Fantom]: 1,
-  [GqlChain.Fraxtal]: 2,
-  [GqlChain.Gnosis]: 5,
-  [GqlChain.Hyperevm]: 1,
-  [GqlChain.Mode]: 2,
-  [GqlChain.Monad]: 1,
-  [GqlChain.Optimism]: 2,
-  [GqlChain.Plasma]: 1,
-  [GqlChain.Polygon]: 2,
-  [GqlChain.Sepolia]: 12,
-  [GqlChain.Sonic]: 1,
-  [GqlChain.Xlayer]: 3,
-  [GqlChain.Zkevm]: 5,
-}
+import { secondsPerBlock } from '@analytics/lib/networks/chain-info'
 
 export const NINETY_DAYS_SECONDS = 90 * 24 * 60 * 60
 export const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60
@@ -48,8 +28,7 @@ export const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60
  * deployment block.
  */
 export function ninetyDayFromBlock(chain: GqlChain, head: bigint): bigint {
-  const spb = SECONDS_PER_BLOCK[chain] ?? 12
-  const blocks = BigInt(Math.ceil(NINETY_DAYS_SECONDS / spb))
+  const blocks = BigInt(Math.ceil(NINETY_DAYS_SECONDS / secondsPerBlock(chain)))
   return head > blocks ? head - blocks : 0n
 }
 
@@ -62,7 +41,6 @@ export function ninetyDayFromBlock(chain: GqlChain, head: bigint): bigint {
  * `sync.ts` bounds V2 DB writes by an order of magnitude.
  */
 export function thirtyDayFromBlock(chain: GqlChain, head: bigint): bigint {
-  const spb = SECONDS_PER_BLOCK[chain] ?? 12
-  const blocks = BigInt(Math.ceil(THIRTY_DAYS_SECONDS / spb))
+  const blocks = BigInt(Math.ceil(THIRTY_DAYS_SECONDS / secondsPerBlock(chain)))
   return head > blocks ? head - blocks : 0n
 }

@@ -32,7 +32,11 @@ export function useGovernance() {
   useEffect(() => {
     let cancelled = false
     const controller = new AbortController()
-    fetchWithRetry('/api/governance', { signal: controller.signal })
+    // `cache: 'no-store'` bypasses the browser's HTTP cache so the user
+    // sees freshly-revalidated data on every page load. The real cache
+    // lives in `unstable_cache` on the server (10-min revalidate), so this
+    // costs one tiny HTTP roundtrip per visit, not a Snapshot call.
+    fetchWithRetry('/api/governance', { cache: 'no-store', signal: controller.signal })
       .then(r => {
         if (!r.ok) throw new Error(`governance HTTP ${r.status}`)
         return r.json() as Promise<GovernancePayload>

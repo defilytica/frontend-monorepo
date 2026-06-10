@@ -9,7 +9,6 @@ import { TvlOverviewChart } from './TvlOverviewChart'
 import { TvlByChainBars } from './TvlByChainBars'
 import { BiggestSwaps } from './BiggestSwaps'
 import { PoolCompositionDonut } from './PoolCompositionDonut'
-import { Governance } from './Governance'
 import { PoolExplorer } from './PoolExplorer'
 
 export function ProtocolOverview() {
@@ -64,11 +63,9 @@ export function ProtocolOverview() {
           </Box>
         </FadeInOnView>
 
-        <FadeInOnView animateOnce={false}>
-          <Box id="governance" scrollMarginTop="96px">
-            <Governance />
-          </Box>
-        </FadeInOnView>
+        {/* Governance moved to its own page (`/governance`) so it can
+            grow widgets — naked-BAL distribution, veBAL stats, etc. The
+            navbar link points there directly. */}
       </VStack>
     </DefaultPageContainer>
   )

@@ -51,7 +51,7 @@ export function BiggestSwaps() {
   const { items, loading, error } = useBiggestSwaps()
 
   return (
-    <Card variant="level1">
+    <Card display="flex" flexDirection="column" h="full" variant="level1">
       <Flex align="center" justify="space-between" mb="md">
         <HStack spacing="sm">
           <Heading size="h6">Top swaps · 24h</Heading>

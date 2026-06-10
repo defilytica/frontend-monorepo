@@ -30,6 +30,7 @@ import {
 } from 'viem'
 import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import { getChainLimit, getPublicClient } from '@analytics/lib/drpc/client'
+import { secondsPerBlock } from '@analytics/lib/networks/chain-info'
 
 // Re-declared ABI subset — only the four reads we need at historical
 // blocks. Keeping it local avoids a circular dep with `read.ts` (which
@@ -41,30 +42,6 @@ const RECLAMM_HISTORY_ABI = parseAbi([
   'function getCurrentLiveBalances() view returns (uint256[] balancesLiveScaled18)',
   'function getCenterednessMargin() view returns (uint256)',
 ]) satisfies Abi
-
-/** Average seconds per block per chain. Used to estimate historical block
- *  numbers from target timestamps without a binary-search RPC dance.
- *  Values are intentionally rounded — variance of ±10% is fine for daily
- *  sampling, and chains with truly variable block times (e.g. Arbitrum
- *  Nitro pre-Stylus) still produce a chart-readable trajectory. Fallback
- *  is 12s (Ethereum mainnet) for any chain not listed. */
-const SECONDS_PER_BLOCK: Partial<Record<GqlChain, number>> = {
-  [GqlChain.Mainnet]: 12,
-  [GqlChain.Sepolia]: 12,
-  [GqlChain.Arbitrum]: 0.26,
-  [GqlChain.Base]: 2,
-  [GqlChain.Optimism]: 2,
-  [GqlChain.Avalanche]: 2,
-  [GqlChain.Polygon]: 2.2,
-  [GqlChain.Zkevm]: 30,
-  [GqlChain.Gnosis]: 5,
-  [GqlChain.Fraxtal]: 2,
-  [GqlChain.Mode]: 2,
-  [GqlChain.Sonic]: 0.4,
-  [GqlChain.Hyperevm]: 1,
-  [GqlChain.Plasma]: 12,
-  [GqlChain.Monad]: 0.5,
-}
 
 export type AutoRangeHistoryPoint = {
   /** Snapshot timestamp this sample anchors to (unix seconds). */
@@ -135,7 +112,7 @@ function estimateBlockAtTs(
   latestTs: number,
   targetTs: number
 ): bigint {
-  const spb = SECONDS_PER_BLOCK[chain] ?? 12
+  const spb = secondsPerBlock(chain)
   const dt = latestTs - targetTs
   if (dt <= 0) return latestBlock
   const blocksBack = BigInt(Math.round(dt / spb))
