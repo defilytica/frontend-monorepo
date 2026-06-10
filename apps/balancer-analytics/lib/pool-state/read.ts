@@ -43,6 +43,15 @@ const VAULT_EXPLORER_ABI = parseAbi([
 const STABLE_POOL_ABI = parseAbi([
   'function getAmplificationParameter() view returns (uint256 value, bool isUpdating, uint256 precision)',
   'function getAmplificationState() view returns ((uint64 startValue, uint64 endValue, uint32 startTime, uint32 endTime) amplificationState, uint256 precision)',
+  // V3 stable pools inherit these bounds from the BasePoolFactory. Older
+  // deployments without the upgrade revert on the call — `allowFailure`
+  // in the multicall lets the read degrade to `null` per slot.
+  'function getMinimumSwapFeePercentage() view returns (uint256)',
+  'function getMaximumSwapFeePercentage() view returns (uint256)',
+  // `getTokenInfo` is part of the V3 pool surface and returns the Vault's
+  // per-token registration tuple: standard / withRate type, rate provider
+  // address, and the yield-fee opt-in flag.
+  'function getTokenInfo() view returns (address[] tokens, (uint8 tokenType, address rateProvider, bool paysYieldFees)[] tokenInfo, uint256[] balancesRaw, uint256[] lastBalancesLiveScaled18)',
 ]) satisfies Abi
 
 const FEE_CONTROLLER_ABI = parseAbi([
@@ -161,6 +170,22 @@ export type StableTypeState = {
     endTime: number
     precision: string
   }
+  /** Hard guard-rails the fee setter operates inside. 1e18-scaled strings,
+   *  V3 only. `null` when the contract doesn't expose the bound (older
+   *  variants) or when reading from a V2 path. */
+  swapFeeMin: string | null
+  swapFeeMax: string | null
+  /** Per-token metadata from `getTokenInfo`, ordered to match
+   *  `poolDetail.tokens` (the Vault returns tokens in registration order,
+   *  which is the order api-v3 surfaces too). `null` when the read failed
+   *  or the pool's on V2. */
+  tokenInfo: Array<{
+    /** `0 = STANDARD`, `1 = WITH_RATE`. ERC4626 wrappers show as `WITH_RATE`
+     *  with a non-zero `rateProvider`. */
+    tokenType: number
+    rateProvider: string
+    paysYieldFees: boolean
+  }> | null
 }
 
 /** All weight/percentage values are 1e18-scaled decimal strings; the
@@ -334,6 +359,10 @@ export async function readStableTypeState(
   poolAddress: Address
 ): Promise<StableTypeState | null> {
   const client = getPublicClient(chain)
+  // Five-slot multicall: amp params/state + the two swap-fee bounds + the
+  // per-token tokenInfo tuple. `allowFailure` lets older pool variants
+  // (which lack the bounds or tokenInfo getters) still surface the amp
+  // params without erroring the whole read.
   const results = await client.multicall({
     contracts: [
       {
@@ -345,6 +374,21 @@ export async function readStableTypeState(
         address: poolAddress,
         abi: STABLE_POOL_ABI,
         functionName: 'getAmplificationState',
+      },
+      {
+        address: poolAddress,
+        abi: STABLE_POOL_ABI,
+        functionName: 'getMinimumSwapFeePercentage',
+      },
+      {
+        address: poolAddress,
+        abi: STABLE_POOL_ABI,
+        functionName: 'getMaximumSwapFeePercentage',
+      },
+      {
+        address: poolAddress,
+        abi: STABLE_POOL_ABI,
+        functionName: 'getTokenInfo',
       },
     ],
     allowFailure: true,
@@ -359,6 +403,32 @@ export async function readStableTypeState(
         bigint,
       ])
     : null
+  const swapFeeMin =
+    results[2].status === 'success' ? (results[2].result as bigint).toString() : null
+  const swapFeeMax =
+    results[3].status === 'success' ? (results[3].result as bigint).toString() : null
+  // `getTokenInfo` returns `(IERC20[] tokens, TokenInfo[] tokenInfo,
+  // uint256[] balancesRaw, uint256[] lastBalancesLiveScaled18)`. Only the
+  // tokenInfo struct array is relevant here — we already have balances
+  // from api-v3.
+  let tokenInfo: StableTypeState['tokenInfo'] = null
+  if (results[4].status === 'success') {
+    const tuple = results[4].result as readonly [
+      readonly string[],
+      readonly {
+        tokenType: number
+        rateProvider: string
+        paysYieldFees: boolean
+      }[],
+      readonly bigint[],
+      readonly bigint[],
+    ]
+    tokenInfo = tuple[1].map(t => ({
+      tokenType: Number(t.tokenType),
+      rateProvider: t.rateProvider,
+      paysYieldFees: t.paysYieldFees,
+    }))
+  }
 
   return {
     amplificationParameter: {
@@ -384,6 +454,9 @@ export async function readStableTypeState(
           endTime: 0,
           precision: param[2].toString(),
         },
+    swapFeeMin,
+    swapFeeMax,
+    tokenInfo,
   }
 }
 
@@ -495,6 +568,14 @@ export async function readV2StableTypeState(
       endTime: 0,
       precision: param[2].toString(),
     },
+    // V2 stable pools don't expose swap-fee bounds or `getTokenInfo` — the
+    // bounds live on the V2 BasePool's protocol fee cache and tokenInfo
+    // lives on the Vault, neither of which is in `StableTypeState`'s
+    // scope. The fields are `null` here so the inspector knows to hide
+    // those Tier-2 rows for V2 pools.
+    swapFeeMin: null,
+    swapFeeMax: null,
+    tokenInfo: null,
   }
 }
 

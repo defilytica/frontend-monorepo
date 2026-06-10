@@ -48,9 +48,9 @@ export function usePoolTypeBreakdown(): { data: PoolBreakdownSlice[]; loading: b
 }
 
 const VERSION_LABEL: Record<number, string> = {
-  1: 'CoW AMM',
-  2: 'Balancer v2',
-  3: 'Balancer v3',
+  1: 'CowAMM',
+  2: 'V2',
+  3: 'V3',
 }
 
 /**

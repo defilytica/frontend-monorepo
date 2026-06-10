@@ -23,7 +23,7 @@ export function TvlByChainBars() {
   const total = rows.reduce((a, b) => a + b.tvl, 0) || 1
 
   return (
-    <Card variant="level1">
+    <Card display="flex" flexDirection="column" h="full" variant="level1">
       <Flex align="center" justify="space-between" mb="md">
         <Heading size="h6">TVL by chain</Heading>
         <Text color="font.secondary" fontSize="xs">
@@ -31,9 +31,9 @@ export function TvlByChainBars() {
         </Text>
       </Flex>
       {loading ? (
-        <Skeleton h="200px" />
+        <Skeleton flex={1} minH="200px" />
       ) : (
-        <VStack align="stretch" spacing="ms">
+        <VStack align="stretch" flex={1} justify="center" spacing="ms">
           {rows.map(r => {
             const color = CHAIN_COLORS[r.chain] ?? '#718096'
             const pct = r.tvl / total

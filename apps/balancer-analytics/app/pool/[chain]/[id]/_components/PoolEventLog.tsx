@@ -26,6 +26,7 @@ import type { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 import type { PoolParamEvent } from '@analytics/lib/pool-events/types'
 import { CATEGORY_ORDER, getEventStyle, type EventCategory } from './eventStyles'
 import { formatEventArgValue } from './formatEventArgs'
+import { getBlockExplorerTxUrl } from '@analytics/lib/networks/chain-info'
 
 // Compact fixed-width DD.MM.YYYY, HH:mm — locale-independent, mono-friendly,
 // dates line up cleanly down the column. Intl's locale formatting can drift
@@ -46,24 +47,6 @@ const dateFullFmt = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
   second: '2-digit',
 })
-
-const EXPLORER_URL: Partial<Record<string, string>> = {
-  MAINNET: 'https://etherscan.io/tx/',
-  ARBITRUM: 'https://arbiscan.io/tx/',
-  AVALANCHE: 'https://snowtrace.io/tx/',
-  BASE: 'https://basescan.org/tx/',
-  GNOSIS: 'https://gnosisscan.io/tx/',
-  OPTIMISM: 'https://optimistic.etherscan.io/tx/',
-  POLYGON: 'https://polygonscan.com/tx/',
-  SEPOLIA: 'https://sepolia.etherscan.io/tx/',
-  FRAXTAL: 'https://fraxscan.com/tx/',
-  MODE: 'https://explorer.mode.network/tx/',
-  ZKEVM: 'https://zkevm.polygonscan.com/tx/',
-  SONIC: 'https://sonicscan.org/tx/',
-  HYPEREVM: 'https://hyperliquid.cloud.blockscout.com/tx/',
-  PLASMA: 'https://plasmascan.to/tx/',
-  MONAD: 'https://testnet.monadexplorer.com/tx/',
-}
 
 function shortHash(h: string): string {
   return `${h.slice(0, 8)}…${h.slice(-6)}`
@@ -326,11 +309,14 @@ function MobileLabel({ children }: { children: React.ReactNode }): React.JSX.Ele
 function EventRow({
   event,
   index,
-  explorerBase,
+  chain,
 }: {
   event: PoolParamEvent
   index: number
-  explorerBase: string
+  /** Source of truth for the tx-explorer URL. Resolved per-row via the
+   *  shared `getBlockExplorerTxUrl` so any chain whose explorer is in
+   *  `packages/lib/config/networks/*.ts` Just Works without a local map. */
+  chain: GqlChain
 }): React.JSX.Element {
   const style = getEventStyle(event.eventName)
   return (
@@ -392,13 +378,13 @@ function EventRow({
           justifySelf={{ base: 'start', md: 'end' }}
         >
           <MobileLabel>Tx</MobileLabel>
-          {explorerBase ? (
-            <Link href={`${explorerBase}${event.txHash}`} rel="noreferrer" target="_blank">
-              {shortHash(event.txHash)}
-            </Link>
-          ) : (
-            shortHash(event.txHash)
-          )}
+          <Link
+            href={getBlockExplorerTxUrl(event.txHash, chain)}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {shortHash(event.txHash)}
+          </Link>
         </GridItem>
       </Grid>
     </Box>
@@ -418,8 +404,6 @@ export function PoolEventLog({
    *  during the streaming window. */
   loading?: boolean
 }): React.JSX.Element {
-  const explorerBase = EXPLORER_URL[chain] ?? ''
-
   // Newest-first canonical order; filtering and pagination derive from this.
   const sorted = useMemo(() => [...events].sort((a, b) => b.blockTimestamp - a.blockTimestamp), [
     events,
@@ -551,7 +535,7 @@ export function PoolEventLog({
               paginationProps={paginationProps}
               renderTableHeader={() => <EventHeader />}
               renderTableRow={({ item, index }) => (
-                <EventRow event={item} explorerBase={explorerBase} index={index} />
+                <EventRow chain={chain} event={item} index={index} />
               )}
               showPagination={filtered.length > pageSize}
             />

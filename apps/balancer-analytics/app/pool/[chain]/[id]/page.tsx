@@ -85,6 +85,28 @@ export type PoolDetail = {
    *  boosted-pool modules without needing to scan tokens client-side. */
   hasErc4626: boolean
   tokens: PoolDetailToken[]
+  /** Share-price of the LP token in normalized units, scaled by the rate
+   *  providers attached to the pool. Surfaced only on V3 stable variants
+   *  (`STABLE`, `COMPOSABLE_STABLE`); `null` otherwise. */
+  bptPriceRate: string | null
+  /** When true, the pool rejects unbalanced add/remove liquidity — only
+   *  proportional liquidity is allowed. Surfaces as a badge on the fee
+   *  card so depositors know what flows are available. */
+  disableUnbalancedLiquidity: boolean | null
+}
+
+/** Snapshot of the security review for a token's price-rate provider.
+ *  Pulled from api-v3's `priceRateProviderData`. The analytics rate-
+ *  providers section uses `reviewed` + `summary` + `warnings` to badge
+ *  each row with a "safe / warnings / unreviewed" status, mirroring
+ *  frontend-v3's `getRateProviderIcon`. */
+export type PriceRateProviderData = {
+  name: string | null
+  summary: string | null
+  reviewed: boolean
+  warnings: string[] | null
+  reviewFile: string | null
+  factory: string | null
 }
 
 export type PoolDetailToken = {
@@ -98,6 +120,13 @@ export type PoolDetailToken = {
   balanceUSD: string
   /** ERC4626 conversion factor (wrapped → underlying). 1 for non-wrapped. */
   priceRate: string
+  /** Address of the rate-provider contract feeding `priceRate`. `null`
+   *  when the token uses no rate provider (the Vault treats it as 1:1). */
+  priceRateProvider: string | null
+  /** Security review snapshot for the rate provider above, or `null`
+   *  when api-v3 has no review entry. The analytics card surfaces this
+   *  as a status icon + warning tooltip per row. */
+  priceRateProviderData: PriceRateProviderData | null
   /** ERC4626-only fields. `isErc4626` gates whether the rest are meaningful;
    *  api-v3 returns `null` for `maxDeposit`/`maxWithdraw`/`underlyingToken`
    *  on non-wrapped tokens. */
@@ -126,6 +155,29 @@ export type PoolSnapshot = {
   fees24h: number
   surplus24h: number
   sharePrice: number
+}
+
+/** Per-token weight snapshot from api-v3. `weights[i]` aligns with
+ *  `poolDetail.tokens[i]`. Fractions, e.g. 0.5 = 50%. */
+export type QuantAmmWeightSnapshot = {
+  timestamp: number
+  weights: number[] | null
+}
+
+/** Slimmed view of api-v3's `QuantAmmWeightedParams` — only the fields the
+ *  analytics weight-shift card surfaces. Strings preserved as-is (api-v3
+ *  returns 1e18-scaled big-decimal strings); formatting happens at render. */
+export type QuantAmmWeightedParams = {
+  lambda: string[]
+  weightsAtLastUpdateInterval: string[]
+  weightBlockMultipliers: string[]
+  updateInterval: string
+  lastUpdateIntervalTime: string
+  lastInterpolationTimePossible: string
+  epsilonMax: string
+  absoluteWeightGuardRail: string
+  maxTradeSizeRatio: string
+  oracleStalenessThreshold: string
 }
 
 export type PoolHistoryRange = '30d' | '90d' | '180d' | '1y' | 'all'
@@ -159,6 +211,15 @@ export type PoolPageData = {
      *  on v2, non-boosted v3, and chains without a VaultExplorer entry. */
     bufferStates: BufferState[] | null
   }
+  /** QuantAMM/BTF history from api-v3. Only populated for pools of type
+   *  `QUANT_AMM_WEIGHTED`; `null` everywhere else. Snapshots are sorted by
+   *  ascending timestamp on the server but we re-sort defensively at the
+   *  boundary. `params` mirrors `quantAmmWeightedParams` on the api-v3
+   *  pool union. */
+  quantAmm: {
+    weightSnapshots: QuantAmmWeightSnapshot[]
+    params: QuantAmmWeightedParams | null
+  } | null
 }
 
 const POOL_DETAIL_QUERY = /* GraphQL */ `
@@ -178,6 +239,11 @@ const POOL_DETAIL_QUERY = /* GraphQL */ `
       pauseManager
       poolCreator
       hasErc4626
+      # Surfaces "proportional liquidity only" on the analytics fee card.
+      # Available on every GqlPoolBase variant, so requested at the root.
+      liquidityManagement {
+        disableUnbalancedLiquidity
+      }
       poolTokens {
         address
         symbol
@@ -187,6 +253,18 @@ const POOL_DETAIL_QUERY = /* GraphQL */ `
         balance
         balanceUSD
         priceRate
+        # Rate-provider surface — drives the "Rate providers" section.
+        # priceRateProvider is the address; priceRateProviderData is the
+        # security review snapshot (reviewed/safe/warnings/factory).
+        priceRateProvider
+        priceRateProviderData {
+          name
+          summary
+          reviewed
+          warnings
+          reviewFile
+          factory
+        }
         isErc4626
         maxDeposit
         maxWithdraw
@@ -202,6 +280,38 @@ const POOL_DETAIL_QUERY = /* GraphQL */ `
         erc4626ReviewData {
           summary
           warnings
+        }
+      }
+      # BPT (LP token) rate, exposed on the V3 stable variants only — for
+      # boosted stable pools this should climb monotonically as the
+      # rate-providers accrue yield. Inline-fragmented because MetaStable
+      # (V2) doesn't expose it.
+      ... on GqlPoolStable {
+        bptPriceRate
+      }
+      ... on GqlPoolComposableStable {
+        bptPriceRate
+      }
+      # QuantAMM/BTF-specific fields. api-v3 returns these only on
+      # GqlPoolQuantAmmWeighted; the inline fragment keeps the payload free
+      # for every other pool type. weightSnapshots drive the stacked-area
+      # chart; quantAmmWeightedParams powers the rule-parameters card.
+      ... on GqlPoolQuantAmmWeighted {
+        weightSnapshots {
+          timestamp
+          weights
+        }
+        quantAmmWeightedParams {
+          lambda
+          weightsAtLastUpdateInterval
+          weightBlockMultipliers
+          updateInterval
+          lastUpdateIntervalTime
+          lastInterpolationTimePossible
+          epsilonMax
+          absoluteWeightGuardRail
+          maxTradeSizeRatio
+          oracleStalenessThreshold
         }
       }
     }
@@ -373,6 +483,7 @@ export default async function Page({
       pauseManager: string | null
       poolCreator: string | null
       hasErc4626: boolean
+      liquidityManagement: { disableUnbalancedLiquidity: boolean | null } | null
       poolTokens: {
         address: string
         symbol: string
@@ -382,6 +493,15 @@ export default async function Page({
         balance: string
         balanceUSD: string
         priceRate: string
+        priceRateProvider: string | null
+        priceRateProviderData: {
+          name: string | null
+          summary: string | null
+          reviewed: boolean
+          warnings: string[] | null
+          reviewFile: string | null
+          factory: string | null
+        } | null
         isErc4626: boolean
         maxDeposit: string | null
         maxWithdraw: string | null
@@ -399,6 +519,26 @@ export default async function Page({
           warnings: string[]
         } | null
       }[]
+      // V3 stable variants only — `bptPriceRate` is in the inline fragment
+      // on `GqlPoolStable` / `GqlPoolComposableStable`; absent everywhere
+      // else (MetaStable / weighted / gyro / …).
+      bptPriceRate?: string | null
+      // Present only on QUANT_AMM_WEIGHTED pools via the inline fragment;
+      // undefined otherwise. Optional fields keep the type honest for
+      // every other pool type that flows through this query.
+      weightSnapshots?: { timestamp: number; weights: number[] | null }[] | null
+      quantAmmWeightedParams?: {
+        lambda: string[]
+        weightsAtLastUpdateInterval: string[]
+        weightBlockMultipliers: string[]
+        updateInterval: string
+        lastUpdateIntervalTime: string
+        lastInterpolationTimePossible: string
+        epsilonMax: string
+        absoluteWeightGuardRail: string
+        maxTradeSizeRatio: string
+        oracleStalenessThreshold: string
+      } | null
     }
   }
   // api-v3 returns `BigDecimal` values as JSON strings — the on-wire shape
@@ -471,6 +611,8 @@ export default async function Page({
       balance: t.balance,
       balanceUSD: t.balanceUSD,
       priceRate: t.priceRate,
+      priceRateProvider: t.priceRateProvider,
+      priceRateProviderData: t.priceRateProviderData,
       isErc4626: t.isErc4626,
       maxDeposit: t.maxDeposit,
       maxWithdraw: t.maxWithdraw,
@@ -480,6 +622,9 @@ export default async function Page({
       underlyingToken: t.underlyingToken,
       erc4626ReviewData: t.erc4626ReviewData,
     })),
+    bptPriceRate: detailRes.poolGetPool.bptPriceRate ?? null,
+    disableUnbalancedLiquidity:
+      detailRes.poolGetPool.liquidityManagement?.disableUnbalancedLiquidity ?? null,
   }
 
   // State reads dispatch on the resolved pool protocol version. V3 uses
@@ -599,6 +744,25 @@ export default async function Page({
     trimmedSnapshots = trimmedSnapshots.filter(s => s.timestamp >= cutoff)
   }
 
+  // QuantAMM history slice — only populated when the pool actually came
+  // back with the inline-fragment fields. Snapshots are sorted ascending
+  // by timestamp so the chart hook can render without re-sorting on every
+  // render. `weights` may be null for an individual snapshot (api-v3
+  // back-fills with null when the contract hadn't been read yet at that
+  // point in history); we keep those entries so the gap shows in the
+  // chart rather than silently interpolating across.
+  const rawWeightSnapshots = detailRes.poolGetPool.weightSnapshots
+  const quantAmmHistory =
+    poolDetail.type === 'QUANT_AMM_WEIGHTED'
+      ? {
+          weightSnapshots: (rawWeightSnapshots ?? [])
+            .slice()
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .map(s => ({ timestamp: s.timestamp, weights: s.weights ?? null })),
+          params: detailRes.poolGetPool.quantAmmWeightedParams ?? null,
+        }
+      : null
+
   const data: PoolPageData = {
     poolDetail,
     snapshots: trimmedSnapshots,
@@ -623,6 +787,7 @@ export default async function Page({
       stableSurge,
       bufferStates,
     },
+    quantAmm: quantAmmHistory,
   }
 
   return <PoolPageView data={data} />

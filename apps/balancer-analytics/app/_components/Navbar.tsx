@@ -27,7 +27,7 @@ const NAV_LINKS: NavLink[] = [
   { label: 'Overview', href: '/#overview', section: 'overview' },
   { label: 'Liquidity', href: '/#liquidity', section: 'liquidity' },
   { label: 'Pools', href: '/#pools', section: 'pools' },
-  { label: 'Governance', href: '/#governance', section: 'governance' },
+  { label: 'Governance', href: '/governance', section: null, matchPaths: ['/governance'] },
   { label: 'Portfolio', href: '/portfolio', section: null, matchPaths: ['/portfolio'] },
 ]
 

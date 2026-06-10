@@ -34,6 +34,7 @@ import {
   type PoolParamEventRow,
 } from '@analytics/lib/db'
 import { getPublicClient } from '@analytics/lib/drpc/client'
+import { blocksPerSecond } from '@analytics/lib/networks/chain-info'
 import { chunkedGetLogs } from '@analytics/lib/drpc/get-logs'
 import { resolveBlockTimestamps } from '@analytics/lib/drpc/block-timestamps'
 import { scrubError } from '@analytics/lib/drpc/scrub'
@@ -232,7 +233,7 @@ async function runSync(
     if (metadata.createTime) {
       const now = Math.floor(Date.now() / 1000)
       const ageSec = Math.max(0, now - metadata.createTime)
-      const ageBlocks = BigInt(Math.ceil(ageSec * estimateBlocksPerSecond(chain)))
+      const ageBlocks = BigInt(Math.ceil(ageSec * blocksPerSecond(chain)))
       createBlock = safeHead > ageBlocks ? safeHead - ageBlocks : 0n
     }
     // V2 pools (dynamic-fee / amp updates) are noisy — some pools fire
@@ -452,30 +453,6 @@ function pickFilterBEvents(metadata: PoolMetadata): readonly unknown[] {
   return []
 }
 
-function estimateBlocksPerSecond(chain: GqlChain): number {
-  // Inverse of `SECONDS_PER_BLOCK` in initial-cap.ts. Inlined here to keep
-  // the cap module side-effect-free and the inverse cheap.
-  const spb: Partial<Record<GqlChain, number>> = {
-    [GqlChain.Mainnet]: 12,
-    [GqlChain.Arbitrum]: 0.25,
-    [GqlChain.Avalanche]: 2,
-    [GqlChain.Base]: 2,
-    [GqlChain.Fantom]: 1,
-    [GqlChain.Fraxtal]: 2,
-    [GqlChain.Gnosis]: 5,
-    [GqlChain.Hyperevm]: 1,
-    [GqlChain.Mode]: 2,
-    [GqlChain.Monad]: 1,
-    [GqlChain.Optimism]: 2,
-    [GqlChain.Plasma]: 1,
-    [GqlChain.Polygon]: 2,
-    [GqlChain.Sepolia]: 12,
-    [GqlChain.Sonic]: 1,
-    [GqlChain.Xlayer]: 3,
-    [GqlChain.Zkevm]: 5,
-  }
-  return 1 / (spb[chain] ?? 12)
-}
 
 async function fetchPoolMetadata(
   chain: GqlChain,

@@ -19,6 +19,7 @@
 import type { PoolPageData } from '../page'
 import { PoolAutoRangeHistory } from './PoolAutoRangeHistory/PoolAutoRangeHistory'
 import { PoolOrderFlow } from './PoolOrderFlow/PoolOrderFlow'
+import { PoolQuantAmmHistory } from './PoolQuantAmmHistory/PoolQuantAmmHistory'
 
 type PoolTypeModule = {
   key: string
@@ -37,6 +38,27 @@ export const POOL_TYPE_MODULES: readonly PoolTypeModule[] = [
         poolId={poolDetail.id}
         poolTokens={poolDetail.tokens}
         poolTvlUsd={snapshots[snapshots.length - 1]?.totalLiquidity ?? 0}
+      />
+    ),
+  },
+  {
+    key: 'quantamm-weight-history',
+    // BTF / dynamic-weight pools (api-v3 enum `QUANT_AMM_WEIGHTED`). The
+    // card hides itself when the pool came back with no `weightSnapshots`
+    // (newly-created pool that hasn't published a snapshot yet).
+    shouldRender: ({ poolDetail, quantAmm }) =>
+      poolDetail.type === 'QUANT_AMM_WEIGHTED' &&
+      (quantAmm?.weightSnapshots.length ?? 0) > 0,
+    render: ({ poolDetail, range, quantAmm }) => (
+      <PoolQuantAmmHistory
+        params={quantAmm?.params ?? null}
+        range={range}
+        tokens={poolDetail.tokens.map(t => ({
+          address: t.address,
+          symbol: t.symbol,
+          logoURI: t.logoURI,
+        }))}
+        weightSnapshots={quantAmm?.weightSnapshots ?? []}
       />
     ),
   },

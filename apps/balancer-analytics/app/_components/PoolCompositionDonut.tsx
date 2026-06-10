@@ -123,15 +123,15 @@ export function PoolCompositionDonut() {
   )
 
   return (
-    <Card variant="level1">
+    <Card display="flex" flexDirection="column" h="full" variant="level1">
       <Flex align="center" flexWrap="wrap" gap="xs" justify="space-between" mb="md">
         <Heading size="h6">Pool composition</Heading>
         <ModeToggle mode={mode} onChange={setMode} />
       </Flex>
       {loading || !data.length ? (
-        <Skeleton h="200px" />
+        <Skeleton flex={1} minH="200px" />
       ) : (
-        <HStack align="center" spacing="md">
+        <HStack align="center" flex={1} justify="center" spacing="md">
           <Box flexShrink={0} h="200px" position="relative" w="200px">
             <ReactECharts option={option} style={{ height: '100%', width: '100%' }} />
             <VStack inset={0} justify="center" pointerEvents="none" position="absolute" spacing={0}>

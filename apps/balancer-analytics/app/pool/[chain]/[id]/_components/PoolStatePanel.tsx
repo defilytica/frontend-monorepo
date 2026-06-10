@@ -12,10 +12,11 @@ import {
   SimpleGrid,
   Stack,
   Text,
+  Tooltip,
   VStack,
 } from '@chakra-ui/react'
 import Link from 'next/link'
-import { ArrowUpRight } from 'react-feather'
+import { AlertTriangle, ArrowUpRight, CheckCircle, HelpCircle } from 'react-feather'
 import type {
   BufferState,
   GyroEclpTypeState,
@@ -26,27 +27,9 @@ import type {
   StableTypeState,
   WeightedTypeState,
 } from '@analytics/lib/pool-state/read'
-import type { PoolDetailToken, PoolPageData } from '../page'
-
-// Block-explorer URL stems per chain (mirrors the per-chain map in
-// PoolEventLog so the analytics surface uses one address-link target).
-const EXPLORER_ADDRESS_URL: Partial<Record<string, string>> = {
-  MAINNET: 'https://etherscan.io/address/',
-  ARBITRUM: 'https://arbiscan.io/address/',
-  AVALANCHE: 'https://snowtrace.io/address/',
-  BASE: 'https://basescan.org/address/',
-  GNOSIS: 'https://gnosisscan.io/address/',
-  OPTIMISM: 'https://optimistic.etherscan.io/address/',
-  POLYGON: 'https://polygonscan.com/address/',
-  SEPOLIA: 'https://sepolia.etherscan.io/address/',
-  FRAXTAL: 'https://fraxscan.com/address/',
-  MODE: 'https://explorer.mode.network/address/',
-  ZKEVM: 'https://zkevm.polygonscan.com/address/',
-  SONIC: 'https://sonicscan.org/address/',
-  HYPEREVM: 'https://hyperliquid.cloud.blockscout.com/address/',
-  PLASMA: 'https://plasmascan.to/address/',
-  MONAD: 'https://testnet.monadexplorer.com/address/',
-}
+import type { PoolDetailToken, PoolPageData, PriceRateProviderData } from '../page'
+import { getBlockExplorerAddressUrl } from '@analytics/lib/networks/chain-info'
+import { GqlChain } from '@repo/lib/shared/services/api/generated/graphql'
 
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000'
 
@@ -75,17 +58,15 @@ function AddressLink({
       </Text>
     )
   }
-  const base = EXPLORER_ADDRESS_URL[chain]
+  // `chain` reaches here as the raw `GqlChain` string from `poolDetail.chain`.
+  // Cast back at the call to the shared helper — `getBlockExplorerAddressUrl`
+  // tolerates unknown chains by falling through to its mainnet fallback,
+  // so an unsupported chain still produces a working (if mainnet-flavoured)
+  // link rather than a dead one.
+  const href = getBlockExplorerAddressUrl(address, chain as GqlChain)
   const label = shortAddr(address)
-  if (!base) {
-    return (
-      <Text fontFamily="mono" fontSize="sm">
-        {label}
-      </Text>
-    )
-  }
   return (
-    <Link href={`${base}${address}`} rel="noreferrer" target="_blank">
+    <Link href={href} rel="noreferrer" target="_blank">
       <Flex
         _hover={{ color: 'font.linkHover' }}
         align="center"
@@ -146,6 +127,111 @@ function formatDuration(seconds: number): string {
   if (!seconds) return '—'
   const d = seconds / 86400
   return `${seconds.toLocaleString()} s · ~${d.toLocaleString(undefined, { maximumFractionDigits: 1 })} d`
+}
+
+// api-v3 returns rate-like values as plain decimal strings (e.g. "1.025"),
+// NOT 1e18-scaled. Display with enough significant digits to surface drift
+// without rounding away yield in the second decimal.
+function formatRate(value: string | null | undefined, sigDigits = 6): string {
+  if (value === null || value === undefined || value === '') return '—'
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '—'
+  if (n === 0) return '0'
+  return n.toLocaleString(undefined, { maximumSignificantDigits: sigDigits })
+}
+
+// V3 stable pools expose `tokenType` as an enum on `TokenInfo`. The Vault's
+// IVault interface defines two values today: STANDARD and WITH_RATE.
+// Numbers outside that range render as "?" so future additions don't crash.
+function tokenTypeLabel(t: number): string {
+  if (t === 0) return 'STANDARD'
+  if (t === 1) return 'WITH_RATE'
+  return `TYPE ${t}`
+}
+
+/**
+ * Maps an api-v3 `priceRateProviderData` snapshot to a tri-state status
+ * + icon + tooltip text. Mirrors frontend-v3's `getRateProviderIcon` but
+ * compressed into a single helper since we don't need the full hover-
+ * popover here — the analytics card is denser. */
+type RateProviderStatus =
+  | { kind: 'safe'; label: string }
+  | { kind: 'warning'; label: string }
+  | { kind: 'unsafe'; label: string }
+  | { kind: 'unreviewed'; label: string }
+  | { kind: 'none'; label: string }
+
+function classifyRateProvider(
+  provider: string | null,
+  data: PriceRateProviderData | null
+): RateProviderStatus {
+  if (!provider || provider.toLowerCase() === ZERO_ADDR) {
+    return { kind: 'none', label: 'No rate provider — Vault treats this token as 1:1.' }
+  }
+  if (!data) {
+    return {
+      kind: 'unreviewed',
+      label: 'No security review on file for this rate provider.',
+    }
+  }
+  const warnings = (data.warnings ?? []).filter(Boolean)
+  const isSafe = data.reviewed && data.summary === 'safe'
+  if (isSafe && warnings.length === 0) {
+    return { kind: 'safe', label: 'Reviewed and marked safe.' }
+  }
+  if (isSafe && warnings.length > 0) {
+    return {
+      kind: 'warning',
+      label: `Reviewed safe with warnings: ${warnings.join(', ')}`,
+    }
+  }
+  return {
+    kind: 'unsafe',
+    label: data.summary
+      ? `Review flagged this provider (${data.summary}).`
+      : 'Review flagged this provider.',
+  }
+}
+
+function RateProviderStatusIcon({ status }: { status: RateProviderStatus }): React.JSX.Element {
+  // Color + icon mirror frontend-v3's getIconAndLevel: green check for
+  // reviewed-safe, amber triangle for warnings or unreviewed, red triangle
+  // for an unsafe review. `none` (no rate provider attached) is a soft
+  // help icon so the row doesn't look broken on plain-stable tokens.
+  if (status.kind === 'safe') {
+    return (
+      <Tooltip hasArrow label={status.label} openDelay={250} placement="top">
+        <Box as="span" color="green.300" cursor="help" display="inline-flex">
+          <CheckCircle size={14} />
+        </Box>
+      </Tooltip>
+    )
+  }
+  if (status.kind === 'warning' || status.kind === 'unreviewed') {
+    return (
+      <Tooltip hasArrow label={status.label} openDelay={250} placement="top">
+        <Box as="span" color="font.warning" cursor="help" display="inline-flex">
+          <AlertTriangle size={14} />
+        </Box>
+      </Tooltip>
+    )
+  }
+  if (status.kind === 'unsafe') {
+    return (
+      <Tooltip hasArrow label={status.label} openDelay={250} placement="top">
+        <Box as="span" color="red.400" cursor="help" display="inline-flex">
+          <AlertTriangle size={14} />
+        </Box>
+      </Tooltip>
+    )
+  }
+  return (
+    <Tooltip hasArrow label={status.label} openDelay={250} placement="top">
+      <Box as="span" color="font.secondary" cursor="help" display="inline-flex" opacity={0.6}>
+        <HelpCircle size={14} />
+      </Box>
+    </Tooltip>
+  )
 }
 
 type Token = { symbol: string }
@@ -1244,7 +1330,13 @@ function BufferSection({
     </Badge>
   ) : null
 
-  const warnings = token.erc4626ReviewData?.warnings ?? []
+  // Filter out empty / null entries — api-v3 occasionally returns a
+  // single `""` placeholder in the warnings array, which used to render
+  // the row with a label but no value. Real warnings stay; empties drop
+  // so the row hides entirely when there's nothing to surface.
+  const warnings = (token.erc4626ReviewData?.warnings ?? []).filter(
+    w => typeof w === 'string' && w.trim().length > 0
+  )
 
   return (
     <TypeSection
@@ -1420,6 +1512,237 @@ function AmpFactorRows({ stable: s }: { stable: StableTypeState }): React.JSX.El
   )
 }
 
+/**
+ * Per-token rate providers + review status. Visible whenever at least one
+ * token has a non-zero `priceRateProvider` (boosted pools, LST stable
+ * pools, etc.). Each row shows: token symbol · current rate · provider
+ * address (linked) · STANDARD / WITH_RATE chip · "yield-fee" pill ·
+ * security review icon. Mirrors frontend-v3's `PoolContracts` rate-
+ * provider row but uses the analytics `StateRow` grammar so labels line
+ * up with the rest of the panel.
+ */
+function RateProvidersSection({
+  tokens,
+  tokenInfo,
+  chain,
+}: {
+  tokens: PoolDetailToken[]
+  /** Per-token info from the V3 Vault. Order-aligned with `tokens`. `null`
+   *  when the on-chain read wasn't available (V2 pool, archive miss). */
+  tokenInfo: StableTypeState['tokenInfo']
+  chain: string
+}): React.JSX.Element {
+  return (
+    <TypeSection title="Rate providers">
+      <VStack align="stretch" spacing="sm" w="full">
+        {tokens.map((t, i) => {
+          const status = classifyRateProvider(t.priceRateProvider, t.priceRateProviderData)
+          const info = tokenInfo?.[i] ?? null
+          return (
+            <StateRow
+              key={t.address}
+              label={t.symbol}
+              value={
+                <VStack align="stretch" spacing="2xs">
+                  <HStack flexWrap="wrap" gap="xs">
+                    <Text fontFamily="mono" fontSize="sm">
+                      {formatRate(t.priceRate)}
+                    </Text>
+                    {t.priceRateProvider && t.priceRateProvider.toLowerCase() !== ZERO_ADDR ? (
+                      <AddressLink address={t.priceRateProvider} chain={chain} />
+                    ) : (
+                      <Text color="font.secondary" fontSize="sm">
+                        no provider
+                      </Text>
+                    )}
+                    <RateProviderStatusIcon status={status} />
+                  </HStack>
+                  {(info || t.isErc4626) && (
+                    <HStack flexWrap="wrap" gap="2xs">
+                      {info && (
+                        <Badge fontSize="2xs" size="sm" variant="outline">
+                          {tokenTypeLabel(info.tokenType)}
+                        </Badge>
+                      )}
+                      {t.isErc4626 && (
+                        <Badge colorScheme="purple" fontSize="2xs" size="sm" variant="subtle">
+                          ERC4626
+                        </Badge>
+                      )}
+                      {info?.paysYieldFees && (
+                        <Tooltip
+                          hasArrow
+                          label="The Vault charges a yield fee on this token's rate-provider yield."
+                          openDelay={250}
+                        >
+                          <Badge
+                            colorScheme="orange"
+                            cursor="help"
+                            fontSize="2xs"
+                            size="sm"
+                            variant="subtle"
+                          >
+                            yield fee
+                          </Badge>
+                        </Tooltip>
+                      )}
+                    </HStack>
+                  )}
+                  {status.kind === 'warning' && (t.priceRateProviderData?.warnings ?? []).length > 0 && (
+                    <Text color="font.warning" fontSize="2xs" opacity={0.85}>
+                      {(t.priceRateProviderData?.warnings ?? []).join(' · ')}
+                    </Text>
+                  )}
+                </VStack>
+              }
+            />
+          )
+        })}
+      </VStack>
+    </TypeSection>
+  )
+}
+
+/**
+ * Composition + imbalance card. Surfaces per-token USD share alongside a
+ * weight-aware imbalance metric.
+ *
+ * The naive `max_share / min_share` reading breaks on weighted pools — an
+ * 80/20 pool sitting perfectly on design reads as 4.00× even though it's
+ * not imbalanced at all. The correct framing is **deviation from target
+ * weight**: each token's `actual_share / target_weight` should be 1.0
+ * when on-design, regardless of what the design is. The card's headline
+ * ratio is then `max(actual/target) / min(actual/target)` — 1.00× means
+ * the pool is sitting exactly on its design weights; higher means
+ * directional flow has tilted the composition relative to the design.
+ *
+ * Target weight per token:
+ *   - Weighted pools (incl. 80/20 etc.): the on-chain normalised weight
+ *     from `pool.tokens[i].weight` (fractional decimal, e.g. `"0.8"`).
+ *   - Stable / CoW / weight-less pools: implicit equal share `1/N`.
+ *   - Mixed (some weights null): defensive fall-through to equal share.
+ */
+function PoolBalancesSection({
+  tokens,
+}: {
+  tokens: PoolDetailToken[]
+}): React.JSX.Element | null {
+  const shares = tokens
+    .map(t => ({ token: t, balanceUSD: Number(t.balanceUSD) }))
+    .filter(s => Number.isFinite(s.balanceUSD))
+  const total = shares.reduce((acc, s) => acc + s.balanceUSD, 0)
+  if (total <= 0 || shares.length === 0) return null
+
+  // Detect whether the pool ships explicit weights. We require every
+  // token to expose a positive weight before trusting them — a mixed
+  // payload (some null, some set) usually means BPT or a sentinel row;
+  // safer to fall through to equal-share than to compute against partial
+  // weights.
+  const parsedWeights = shares.map(s => Number(s.token.weight ?? ''))
+  const hasExplicitWeights =
+    parsedWeights.every(w => Number.isFinite(w) && w > 0) &&
+    Math.abs(parsedWeights.reduce((a, b) => a + b, 0) - 1) < 0.02
+  const fallbackWeight = 1 / shares.length
+
+  const enriched = shares.map((s, i) => {
+    const share = s.balanceUSD / total
+    const targetWeight = hasExplicitWeights ? parsedWeights[i] : fallbackWeight
+    // `actual / target` — 1.0 means the token sits on its design weight,
+    // <1 means depleted vs design, >1 means accumulated vs design.
+    const ratioToTarget = targetWeight > 0 ? share / targetWeight : NaN
+    return { ...s, share, targetWeight, ratioToTarget }
+  })
+  const validRatios = enriched
+    .map(e => e.ratioToTarget)
+    .filter(r => Number.isFinite(r) && r > 0)
+  const ratio =
+    validRatios.length >= 2
+      ? Math.max(...validRatios) / Math.min(...validRatios)
+      : NaN
+
+  const tooltipLabel = hasExplicitWeights
+    ? 'Largest (actual share / target weight) divided by smallest. 1.00× means the pool sits on its design weights (e.g. 80/20 with each side exactly on target); higher means flow has tilted composition relative to design.'
+    : 'Largest token share divided by smallest. 1.00× means perfectly balanced; higher means one side is being depleted by directional flow.'
+
+  return (
+    <TypeSection
+      badge={
+        <Tooltip hasArrow label={tooltipLabel} openDelay={250}>
+          <Badge
+            colorScheme={ratio < 1.25 ? 'green' : ratio < 1.75 ? 'orange' : 'red'}
+            cursor="help"
+            fontSize="xs"
+          >
+            {Number.isFinite(ratio) ? `${ratio.toFixed(2)}×` : '—'}
+          </Badge>
+        </Tooltip>
+      }
+      title="Composition & imbalance"
+    >
+      <VStack align="stretch" spacing="sm" w="full">
+        {enriched.map(({ token, share, balanceUSD, targetWeight, ratioToTarget }) => {
+          const pctText = `${(share * 100).toFixed(2)}%`
+          // Highlight the bar color when the token has drifted noticeably
+          // off its target weight — soft amber past ±25% relative
+          // deviation, plain accent otherwise. Reads identically on
+          // weighted and stable pools because the metric is normalized.
+          const deviation = Number.isFinite(ratioToTarget) ? Math.abs(ratioToTarget - 1) : 0
+          const barColor = deviation > 0.25 ? 'orange.300' : 'green.300'
+          // For weighted pools we surface the target weight inline so the
+          // operator can read "actual 81% / target 80%" at a glance.
+          const targetText = hasExplicitWeights
+            ? `target ${(targetWeight * 100).toFixed(0)}%`
+            : null
+          return (
+            <Box key={token.address}>
+              <HStack justify="space-between" mb="2xs">
+                <HStack spacing="xs">
+                  <Text fontSize="sm">{token.symbol}</Text>
+                  {targetText && (
+                    <Text color="font.secondary" fontSize="xs" opacity={0.7}>
+                      · {targetText}
+                    </Text>
+                  )}
+                </HStack>
+                <HStack spacing="xs">
+                  <Text color="font.secondary" fontFamily="mono" fontSize="xs">
+                    ${balanceUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </Text>
+                  <Text fontFamily="mono" fontSize="sm">
+                    {pctText}
+                  </Text>
+                </HStack>
+              </HStack>
+              <Box bg="background.level0" borderRadius="full" h="6px" overflow="hidden" position="relative">
+                <Box
+                  bg={barColor}
+                  borderRadius="full"
+                  h="100%"
+                  transition="width 0.2s"
+                  w={`${share * 100}%`}
+                />
+                {/* Target-weight marker — a faint vertical tick at the
+                    token's design weight. On a balanced 80/20 pool it
+                    sits exactly at the end of the bar; on a stable pool
+                    it sits at the equal-share centroid. */}
+                <Box
+                  bg="font.secondary"
+                  h="100%"
+                  left={`${targetWeight * 100}%`}
+                  opacity={0.5}
+                  position="absolute"
+                  top={0}
+                  w="1px"
+                />
+              </Box>
+            </Box>
+          )
+        })}
+      </VStack>
+    </TypeSection>
+  )
+}
+
 export function PoolStatePanel({
   poolDetail,
   state,
@@ -1585,8 +1908,31 @@ export function PoolStatePanel({
           tuning → StableSurge hook; AutoRange payload → AutoRange). */}
       <SimpleGrid columns={{ base: 1, lg: 2 }} spacing="md" w="full">
         {u && (
-          <TypeSection title="Fee parameters">
-            <StateRow label="Swap fee" value={formatPercent(u.swapFeePercentage)} />
+          <TypeSection
+            badge={
+              poolDetail.disableUnbalancedLiquidity ? (
+                <Tooltip
+                  hasArrow
+                  label="This pool only accepts proportional add / remove liquidity. Unbalanced operations are rejected by the pool's LiquidityManagement config."
+                  openDelay={250}
+                >
+                  <Badge colorScheme="purple" cursor="help" fontSize="xs">
+                    proportional only
+                  </Badge>
+                </Tooltip>
+              ) : undefined
+            }
+            title="Fee parameters"
+          >
+            <StateRow
+              hint={
+                s && (s.swapFeeMin || s.swapFeeMax)
+                  ? `bounds: ${formatPercent(s.swapFeeMin)} – ${formatPercent(s.swapFeeMax)}`
+                  : undefined
+              }
+              label="Swap fee"
+              value={formatPercent(u.swapFeePercentage)}
+            />
             <StateRow
               hint="protocol + creator on swaps"
               label="Aggregate swap fee"
@@ -1597,6 +1943,13 @@ export function PoolStatePanel({
               label="Aggregate yield fee"
               value={formatPercent(u.aggregateYieldFeePercentage)}
             />
+            {poolDetail.bptPriceRate && (
+              <StateRow
+                hint="LP token share price (rate-provider scaled)"
+                label="BPT rate"
+                value={formatRate(poolDetail.bptPriceRate)}
+              />
+            )}
             {s && <AmpFactorRows stable={s} />}
             {(u.poolCreatorSwapFeePercentage !== null ||
               u.poolCreatorYieldFeePercentage !== null) && (
@@ -1647,6 +2000,21 @@ export function PoolStatePanel({
 
         <PermissionsSection poolDetail={poolDetail} />
 
+        {/* Composition + rate providers — most informative on stable pools
+            but cheap on every type, so we render whenever the underlying
+            data is present. Composition runs off api-v3's balanceUSD;
+            rate providers gate on at least one non-zero provider so plain
+            weighted pools don't get an empty card. */}
+        {hasAnyRateProvider(poolDetail.tokens) && (
+          <RateProvidersSection
+            chain={poolDetail.chain as string}
+            tokenInfo={s?.tokenInfo ?? null}
+            tokens={poolDetail.tokens}
+          />
+        )}
+
+        <PoolBalancesSection tokens={poolDetail.tokens} />
+
         {typeSpecificCard}
 
         {state.stableSurge && (
@@ -1660,5 +2028,14 @@ export function PoolStatePanel({
         {bufferSections}
       </SimpleGrid>
     </VStack>
+  )
+}
+
+/** Any non-zero rate provider gates the Rate providers section so plain
+ *  weighted pools — which leave every token's `priceRateProvider` at the
+ *  zero address — don't render an empty card. */
+function hasAnyRateProvider(tokens: PoolDetailToken[]): boolean {
+  return tokens.some(
+    t => t.priceRateProvider && t.priceRateProvider.toLowerCase() !== ZERO_ADDR
   )
 }

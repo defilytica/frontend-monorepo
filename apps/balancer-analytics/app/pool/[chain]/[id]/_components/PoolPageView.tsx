@@ -22,7 +22,8 @@ import { DefaultPageContainer } from '@repo/lib/shared/components/containers/Def
 import FadeInOnView from '@repo/lib/shared/components/containers/FadeInOnView'
 import { NoisyCard } from '@repo/lib/shared/components/containers/NoisyCard'
 import { NetworkIcon } from '@repo/lib/shared/components/icons/NetworkIcon'
-import { chainToSlugMap } from '@repo/lib/modules/pool/pool.utils'
+import { chainToSlugMap, getPoolTypeLabel } from '@repo/lib/modules/pool/pool.utils'
+import { GqlPoolType } from '@repo/lib/shared/services/api/generated/graphql'
 import { usePoolEvents } from '@analytics/lib/hooks/usePoolEvents'
 import type { PoolPageData } from '../page'
 import { PoolHistoryChart } from './PoolHistoryChart'
@@ -34,6 +35,14 @@ import { CompareModeToolbar } from './CompareModeToolbar'
 import { PoolSnapshotTile } from './PoolSnapshotTile'
 import { POOL_TYPE_MODULES } from './poolTypeModules'
 import { PoolTokenPillsLite } from '@analytics/app/_components/PoolTokenPillsLite'
+
+// Mirrors the AutoRange rebrand applied in PoolDetailsCellLite /
+// PoolExplorerFilters. The internal `RECLAMM` type string stays untouched
+// for API filters and module dispatch — only the UI label is overridden.
+function formatPoolTypeLabel(t: string): string {
+  if (t === GqlPoolType.Reclamm) return 'AutoRange'
+  return getPoolTypeLabel(t as GqlPoolType)
+}
 
 function shortAddr(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
@@ -255,10 +264,10 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
                   px="ms"
                   py="2xs"
                   rounded="full"
-                  textTransform="lowercase"
+                  textTransform="none"
                   variant="outline"
                 >
-                  {poolDetail.type.replace(/_/g, ' ')}
+                  {formatPoolTypeLabel(poolDetail.type)}
                 </Badge>
               </Flex>
               <Heading
