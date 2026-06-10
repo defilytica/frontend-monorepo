@@ -6,16 +6,18 @@ import {
   Breadcrumb,
   BreadcrumbItem,
   BreadcrumbLink,
+  Button,
   Card,
   Flex,
   Heading,
+  HStack,
   Spinner,
   Stack,
   Text,
   VStack,
 } from '@chakra-ui/react'
 import Link from 'next/link'
-import { ChevronRight, ExternalLink, Home } from 'react-feather'
+import { ChevronRight, ExternalLink, GitBranch, Home } from 'react-feather'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useState, useTransition } from 'react'
 import { DefaultPageContainer } from '@repo/lib/shared/components/containers/DefaultPageContainer'
@@ -32,9 +34,12 @@ import { PoolEventLog } from './PoolEventLog'
 import { getEventStyle } from './eventStyles'
 import { HistoryRangeToggle, type HistoryRange } from './HistoryRangeToggle'
 import { CompareModeToolbar } from './CompareModeToolbar'
+import { PoolComparisonModal } from './PoolComparisonModal'
+import { PoolPickerModal } from './PoolPickerModal'
 import { PoolSnapshotTile } from './PoolSnapshotTile'
 import { POOL_TYPE_MODULES } from './poolTypeModules'
 import { PoolTokenPillsLite } from '@analytics/app/_components/PoolTokenPillsLite'
+import type { EnrichedPool } from '@analytics/lib/hooks/usePoolExplorer'
 
 // Mirrors the AutoRange rebrand applied in PoolDetailsCellLite /
 // PoolExplorerFilters. The internal `RECLAMM` type string stays untouched
@@ -42,10 +47,6 @@ import { PoolTokenPillsLite } from '@analytics/app/_components/PoolTokenPillsLit
 function formatPoolTypeLabel(t: string): string {
   if (t === GqlPoolType.Reclamm) return 'AutoRange'
   return getPoolTypeLabel(t as GqlPoolType)
-}
-
-function shortAddr(addr: string): string {
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`
 }
 
 function frontendPoolHref(p: PoolPageData['poolDetail']): string {
@@ -194,6 +195,18 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
   )
   const isRangeChanging = pendingRange !== null
 
+  // Pool-vs-pool comparison state. The picker opens first; once a target is
+  // chosen we close the picker, open the comparison modal, and surface the
+  // chosen target as `compareTarget` so the modal can re-render across
+  // user-side modal-close cycles without re-fetching the picker list.
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [compareTarget, setCompareTarget] = useState<EnrichedPool | null>(null)
+  const handleCompareSelect = useCallback((pool: EnrichedPool) => {
+    setCompareTarget(pool)
+    setPickerOpen(false)
+  }, [])
+  const closeComparison = useCallback(() => setCompareTarget(null), [])
+
   return (
     <DefaultPageContainer pb="2xl" pt={['md', 'lg']}>
       <VStack align="stretch" spacing={{ base: 'lg', md: 'xl' }}>
@@ -281,30 +294,27 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
                 Parameter timeline and impact analysis
               </Text>
             </VStack>
-            <VStack align={{ base: 'flex-start', lg: 'flex-end' }} spacing="xs">
-              <Link href={frontendPoolHref(poolDetail)} rel="noreferrer" target="_blank">
-                <Flex
-                  _hover={{ color: 'font.linkHover', borderColor: 'font.linkHover' }}
-                  align="center"
-                  border="1px solid"
-                  borderColor="border.base"
-                  color="font.secondary"
-                  fontSize="xs"
-                  fontWeight="500"
-                  gap="xs"
-                  px="ms"
-                  py="2xs"
-                  rounded="full"
-                  transition="color 0.15s, border-color 0.15s"
-                >
-                  Open in balancer.fi
-                  <ExternalLink size={12} />
-                </Flex>
-              </Link>
-              <Text fontFamily="mono" fontSize="2xs" variant="secondary">
-                {shortAddr(poolDetail.address)}
-              </Text>
-            </VStack>
+            <HStack spacing="sm">
+              <Button
+                leftIcon={<GitBranch size={14} />}
+                onClick={() => setPickerOpen(true)}
+                size="md"
+                variant="primary"
+              >
+                Compare
+              </Button>
+              <Button
+                as={Link}
+                href={frontendPoolHref(poolDetail)}
+                rel="noreferrer"
+                rightIcon={<ExternalLink size={14} />}
+                size="md"
+                target="_blank"
+                variant="primary"
+              >
+                Balancer.fi
+              </Button>
+            </HStack>
           </Stack>
         </FadeInOnView>
 
@@ -415,6 +425,27 @@ export function PoolPageView({ data }: { data: PoolPageData }): React.JSX.Elemen
           <PoolEventLog chain={poolDetail.chain} events={events} loading={eventsLoading} />
         </FadeInOnView>
       </VStack>
+
+      <PoolPickerModal
+        currentPool={{
+          id: poolDetail.id,
+          chain: poolDetail.chain,
+          name: poolDetail.name,
+        }}
+        isOpen={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onSelect={handleCompareSelect}
+      />
+      {compareTarget && (
+        <PoolComparisonModal
+          isOpen={compareTarget !== null}
+          onClose={closeComparison}
+          sourcePool={poolDetail}
+          sourceSnapshots={snapshots}
+          sourceState={state}
+          targetPool={compareTarget}
+        />
+      )}
     </DefaultPageContainer>
   )
 }
